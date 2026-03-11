@@ -133,6 +133,20 @@ def list_entities(entity_type: str | None):
         click.echo(f"{e.id} ({len(e.facts)} facts, updated {updated})")
 
 
+@main.command()
+@click.argument("query")
+@click.option("--type", "entity_type", default=None, help="Filter by entity type")
+@click.option("--limit", default=5, help="Max results to return")
+def search(query: str, entity_type: str | None, limit: int):
+    """Semantic search across all entities."""
+    from entity_memory.search import search_entities, format_results
+
+    client = get_client()
+    embedder = _get_embedder()
+    results = search_entities(client, query, embedder, entity_type=entity_type, limit=limit)
+    click.echo(format_results(results))
+
+
 EVENT_TTL_DAYS = 30
 
 
