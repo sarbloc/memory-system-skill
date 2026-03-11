@@ -1,6 +1,7 @@
 """CLI entry point for the memory command."""
 
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 
 import click
 
@@ -10,7 +11,10 @@ from entity_memory.client import (
     ensure_collections,
     get_client,
     get_entity,
+    get_unextracted_events,
+    mark_event_extracted,
     scroll_entities,
+    store_event,
     upsert_entity,
 )
 from entity_memory.merge import build_search_text, merge
@@ -127,6 +131,76 @@ def list_entities(entity_type: str | None):
     for e in entities:
         updated = e.last_updated[:10] if e.last_updated else "unknown"
         click.echo(f"{e.id} ({len(e.facts)} facts, updated {updated})")
+
+
+EVENT_TTL_DAYS = 30
+
+
+@main.command()
+@click.argument("text")
+@click.option("--source", default="conversation", help="Event source: conversation|task|cron")
+@click.option("--agent", default="main", help="Agent name")
+def event(text: str, source: str, agent: str):
+    """Log a raw observation. No entity extraction happens immediately."""
+    client = get_client()
+    ensure_collections(client)
+    embedder = _get_embedder()
+
+    now = datetime.utcnow()
+    event_id = str(uuid.uuid4())
+    vector = embedder.embed(text)
+    expires = (now + timedelta(days=EVENT_TTL_DAYS)).isoformat()
+
+    store_event(
+        client, event_id=event_id, text=text, vector=vector,
+        timestamp=now.isoformat(), source=source, agent=agent, expires=expires,
+    )
+    click.echo(f"Logged event: {event_id[:8]}...")
+
+
+@main.command()
+@click.option("--since", default=None, help="Process events from last N minutes (e.g. 55m)")
+@click.option("--all", "process_all", is_flag=True, help="Process all unextracted events")
+def extract(since: str | None, process_all: bool):
+    """Process unextracted events into entity upserts."""
+    from entity_memory.extract import extract_events
+
+    client = get_client()
+    embedder = _get_embedder()
+
+    since_dt = None
+    if since and not process_all:
+        minutes = int(since.rstrip("m"))
+        since_dt = datetime.utcnow() - timedelta(minutes=minutes)
+
+    events = get_unextracted_events(client, since=since_dt)
+    if not events:
+        click.echo("No unextracted events found.")
+        return
+
+    entities = scroll_entities(client)
+    now = datetime.utcnow()
+    today = now.date().isoformat()
+
+    result = extract_events(events, entities, embedder, now=now)
+
+    # Merge matched sentences into their entities
+    for sentence, entity in result.matched:
+        new_fact = Fact(text=sentence, added=today, source="extract")
+        merged = merge(entity, [new_fact], embedder, now=now)
+        vector = embedder.embed(build_search_text(merged))
+        upsert_entity(client, merged, vector)
+
+    # Mark events as extracted
+    for ev in events:
+        mark_event_extracted(client, ev["id"])
+
+    click.echo(f"Processed {result.events_processed} events:")
+    click.echo(f"  {len(result.matched)} sentences matched to entities")
+    click.echo(f"  {len(result.unmatched)} unmatched sentences")
+
+    for s in result.unmatched:
+        click.echo(f"  UNMATCHED: \"{s}\"")
 
 
 if __name__ == "__main__":
