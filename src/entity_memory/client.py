@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -214,6 +215,68 @@ def scroll_entities(
                 break
             offset = next_offset
     return results
+
+
+def store_event(
+    client: QdrantClient, event_id: str, text: str, vector: list[float],
+    timestamp: str, source: str = "conversation", agent: str = "main",
+    expires: str | None = None,
+) -> None:
+    """Store a raw event in the events collection."""
+    point = PointStruct(
+        id=event_id,
+        vector=vector,
+        payload={
+            "text": text,
+            "timestamp": timestamp,
+            "source": source,
+            "agent": agent,
+            "extracted": False,
+            "expires": expires,
+        },
+    )
+    client.upsert(collection_name="events", points=[point])
+
+
+def get_unextracted_events(
+    client: QdrantClient, since: datetime | None = None,
+) -> list[dict]:
+    """Get events where extracted=false, optionally filtered by time."""
+    conditions = [
+        FieldCondition(key="extracted", match=MatchValue(value=False)),
+    ]
+    scroll_filter = Filter(must=conditions)
+    results = []
+    offset = None
+    while True:
+        points, next_offset = client.scroll(
+            collection_name="events",
+            scroll_filter=scroll_filter,
+            limit=100,
+            offset=offset,
+            with_payload=True,
+        )
+        for p in points:
+            payload = p.payload
+            # Apply time filter in code (Qdrant doesn't have great datetime filtering)
+            if since is not None:
+                ts = datetime.fromisoformat(payload["timestamp"])
+                if ts < since:
+                    continue
+            results.append({"id": p.id, **payload})
+        if next_offset is None:
+            break
+        offset = next_offset
+    return results
+
+
+def mark_event_extracted(client: QdrantClient, event_id: str) -> None:
+    """Mark an event as extracted."""
+    client.set_payload(
+        collection_name="events",
+        payload={"extracted": True},
+        points=[event_id],
+    )
 
 
 def collection_stats(client: QdrantClient) -> dict[str, dict]:
