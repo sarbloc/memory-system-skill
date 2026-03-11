@@ -1,0 +1,20 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: openclaw-memory
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  qdrant_data:
