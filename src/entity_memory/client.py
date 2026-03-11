@@ -186,6 +186,36 @@ def delete_entity(client: QdrantClient, entity_id: str) -> bool:
     return False
 
 
+def scroll_entities(
+    client: QdrantClient, entity_type: str | None = None
+) -> list[Entity]:
+    """Scroll through entities (and decisions) collection, optionally filtered by type."""
+    results = []
+    for collection in ["entities", "decisions"]:
+        if not client.collection_exists(collection):
+            continue
+        scroll_filter = None
+        if entity_type:
+            scroll_filter = Filter(
+                must=[FieldCondition(key="type", match=MatchValue(value=entity_type))]
+            )
+        offset = None
+        while True:
+            points, next_offset = client.scroll(
+                collection_name=collection,
+                scroll_filter=scroll_filter,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+            for p in points:
+                results.append(point_to_entity(p))
+            if next_offset is None:
+                break
+            offset = next_offset
+    return results
+
+
 def collection_stats(client: QdrantClient) -> dict[str, dict]:
     """Get point counts and metadata for all collections."""
     stats = {}
