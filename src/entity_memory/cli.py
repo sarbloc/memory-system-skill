@@ -17,7 +17,7 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
-from entity_memory.merge import build_search_text, merge
+from entity_memory.merge import build_search_text, compact, drop_expired, merge
 from entity_memory.models import Entity, Fact
 
 
@@ -215,6 +215,111 @@ def extract(since: str | None, process_all: bool):
 
     for s in result.unmatched:
         click.echo(f"  UNMATCHED: \"{s}\"")
+
+
+@main.command(name="compact")
+@click.option("--max-facts", default=20, help="Max facts per entity")
+def compact_cmd(max_facts: int):
+    """Run compaction on all entities exceeding the facts limit."""
+    client = get_client()
+    embedder = _get_embedder()
+    entities = scroll_entities(client)
+
+    compacted = 0
+    now = datetime.utcnow()
+    for entity in entities:
+        if len(entity.facts) > max_facts:
+            entity = compact(entity, max_facts=max_facts, now=now)
+            vector = embedder.embed(build_search_text(entity))
+            upsert_entity(client, entity, vector)
+            compacted += 1
+
+    click.echo(f"Compacted {compacted} entities (max_facts={max_facts}).")
+
+
+@main.command()
+def expire():
+    """Garbage-collect expired events and entity facts."""
+    client = get_client()
+    embedder = _get_embedder()
+    now = datetime.utcnow()
+
+    # Expire events
+    expired_events = 0
+    offset = None
+    while True:
+        points, next_offset = client.scroll(
+            collection_name="events", limit=100, offset=offset, with_payload=True,
+        )
+        expired_ids = []
+        for p in points:
+            expires = p.payload.get("expires")
+            if expires and datetime.fromisoformat(expires) < now:
+                expired_ids.append(p.id)
+        if expired_ids:
+            client.delete(collection_name="events", points_selector=expired_ids)
+            expired_events += len(expired_ids)
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    # Expire entity facts
+    updated_entities = 0
+    entities = scroll_entities(client)
+    for entity in entities:
+        before = len(entity.facts)
+        entity.facts = drop_expired(entity.facts, now)
+        if len(entity.facts) < before:
+            entity.last_updated = now.isoformat()
+            vector = embedder.embed(build_search_text(entity))
+            upsert_entity(client, entity, vector)
+            updated_entities += 1
+
+    click.echo(f"Expired {expired_events} events, updated {updated_entities} entities.")
+
+
+@main.command(name="export")
+@click.option("--format", "fmt", type=click.Choice(["json", "md"]), default="json", help="Output format")
+def export_cmd(fmt: str):
+    """Export all entities for backup or inspection."""
+    import sys
+    from entity_memory.export import export_json, export_markdown
+
+    client = get_client()
+    entities = scroll_entities(client)
+
+    if fmt == "json":
+        export_json(entities, sys.stdout)
+    else:
+        export_markdown(entities, sys.stdout)
+
+
+@main.command(name="import")
+@click.argument("file", type=click.Path(exists=True))
+def import_cmd(file: str):
+    """Import entities from a JSON export. Runs merge logic (won't duplicate)."""
+    import json as json_mod
+    from entity_memory.export import import_json
+
+    client = get_client()
+    ensure_collections(client)
+    embedder = _get_embedder()
+    now = datetime.utcnow()
+
+    with open(file) as f:
+        data = json_mod.load(f)
+
+    imported = import_json(data)
+    for entity in imported:
+        existing = get_entity(client, entity.id)
+        if existing is None:
+            existing = Entity(id=entity.id, type=entity.type)
+
+        merged = merge(existing, entity.facts, embedder, now=now)
+        vector = embedder.embed(build_search_text(merged))
+        upsert_entity(client, merged, vector)
+
+    click.echo(f"Imported {len(imported)} entities.")
 
 
 if __name__ == "__main__":
