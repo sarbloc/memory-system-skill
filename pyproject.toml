@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entity-memory"
+version = "0.1.0"
+description = "Entity-based persistent memory with semantic search for OpenClaw agents"
+requires-python = ">=3.11"
+dependencies = [
+    "qdrant-client>=1.12",
+    "sentence-transformers>=3.0",
+    "click>=8.0",
+    "numpy>=1.24",
+]
+
+[project.scripts]
+memory = "entity_memory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
