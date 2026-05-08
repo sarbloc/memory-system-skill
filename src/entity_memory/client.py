@@ -1,4 +1,17 @@
-"""Qdrant client wrapper: connection, collection setup, and CRUD helpers."""
+"""Qdrant client wrapper: connection, collection setup, and CRUD helpers.
+
+Collections are organised along two axes:
+- **Domain** — `shared`, `dev`, or `personal`. Endurance writes per-domain;
+  OpenClaw and existing callers default to `shared`.
+- **Kind** — `entities`, `events`, or `decisions`. The original storage shape.
+
+`shared` is the legacy default and uses the original collection names
+(`entities`, `events`, `decisions`) for backward compatibility. Other
+domains use `<domain>_<kind>` (e.g. `dev_entities`, `personal_events`).
+
+All public CRUD helpers accept an optional `domain="shared"` kwarg, so
+existing call sites continue to work unchanged.
+"""
 
 from __future__ import annotations
 
@@ -24,8 +37,30 @@ from qdrant_client.models import (
 
 from entity_memory.models import Entity, Event, Fact
 
-COLLECTIONS = ["entities", "events", "decisions"]
+DOMAINS = ["shared", "dev", "personal"]
+COLLECTION_KINDS = ["entities", "events", "decisions"]
 VECTOR_SIZE = 384
+
+
+def collection_name(domain: str, kind: str) -> str:
+    """Resolve a (domain, kind) pair to a Qdrant collection name.
+
+    `shared` keeps the legacy bare names so OpenClaw data isn't moved.
+    Other domains are namespaced with `<domain>_<kind>`.
+    """
+    if domain not in DOMAINS:
+        raise ValueError(f"Unknown domain {domain!r}; expected one of {DOMAINS}")
+    if kind not in COLLECTION_KINDS:
+        raise ValueError(f"Unknown kind {kind!r}; expected one of {COLLECTION_KINDS}")
+    if domain == "shared":
+        return kind
+    return f"{domain}_{kind}"
+
+
+ALL_COLLECTIONS = [collection_name(d, k) for d in DOMAINS for k in COLLECTION_KINDS]
+
+# Back-compat alias for callers that imported the legacy 3-collection list.
+COLLECTIONS = [collection_name("shared", k) for k in COLLECTION_KINDS]
 
 
 def load_config() -> dict:
@@ -52,9 +87,12 @@ def get_client(config: dict | None = None) -> QdrantClient:
 
 
 def ensure_collections(client: QdrantClient) -> list[str]:
-    """Create collections and indexes if they don't exist. Returns list of created collections."""
+    """Create all (domain, kind) collections + indexes if missing.
+
+    Returns the list of collection names that were freshly created.
+    """
     created = []
-    for name in COLLECTIONS:
+    for name in ALL_COLLECTIONS:
         if not client.collection_exists(name):
             client.create_collection(
                 collection_name=name,
@@ -78,7 +116,6 @@ def ensure_collections(client: QdrantClient) -> list[str]:
 def entity_point_id(entity_id: str) -> str:
     """Deterministic UUID from entity_id for Qdrant point ID."""
     h = hashlib.sha256(entity_id.encode()).hexdigest()
-    # Format as UUID: 8-4-4-4-12
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 
 
@@ -132,68 +169,62 @@ def point_to_entity(point) -> Entity:
     )
 
 
-def get_entity(client: QdrantClient, entity_id: str) -> Optional[Entity]:
-    """Retrieve a single entity by ID. Returns None if not found."""
-    collection = "decisions" if entity_id.startswith("decision:") or _is_decision(client, entity_id) else "entities"
-    points = client.retrieve(
-        collection_name=collection,
-        ids=[entity_point_id(entity_id)],
-        with_payload=True,
-    )
-    if not points:
-        # Try the other collection
-        other = "decisions" if collection == "entities" else "entities"
-        points = client.retrieve(
-            collection_name=other,
-            ids=[entity_point_id(entity_id)],
-            with_payload=True,
-        )
-    if not points:
-        return None
-    return point_to_entity(points[0])
+def get_entity(
+    client: QdrantClient, entity_id: str, *, domain: str = "shared",
+) -> Optional[Entity]:
+    """Retrieve a single entity by ID from the given domain. Returns None if missing.
 
+    Decisions and entities live in different collections; this checks both within
+    the same domain.
+    """
+    point_id = entity_point_id(entity_id)
+    primary = collection_name(domain, "decisions" if entity_id.startswith("decision:") else "entities")
+    fallback = collection_name(domain, "entities" if primary.endswith("decisions") else "decisions")
 
-def _is_decision(client: QdrantClient, entity_id: str) -> bool:
-    """Check if an entity_id exists in the decisions collection."""
-    points = client.retrieve(
-        collection_name="decisions",
-        ids=[entity_point_id(entity_id)],
-        with_payload=False,
-    )
-    return len(points) > 0
-
-
-def upsert_entity(client: QdrantClient, entity: Entity, vector: list[float]) -> None:
-    """Upsert an entity into the appropriate collection."""
-    collection = "decisions" if entity.type == "decision" else "entities"
-    point = entity_to_point(entity, vector)
-    client.upsert(collection_name=collection, points=[point])
-
-
-def delete_entity(client: QdrantClient, entity_id: str) -> bool:
-    """Delete an entity by ID. Returns True if found and deleted."""
-    for collection in ["entities", "decisions"]:
-        points = client.retrieve(
-            collection_name=collection,
-            ids=[entity_point_id(entity_id)],
-            with_payload=False,
-        )
+    if client.collection_exists(primary):
+        points = client.retrieve(collection_name=primary, ids=[point_id], with_payload=True)
         if points:
-            client.delete(
-                collection_name=collection,
-                points_selector=[entity_point_id(entity_id)],
-            )
+            return point_to_entity(points[0])
+    if client.collection_exists(fallback):
+        points = client.retrieve(collection_name=fallback, ids=[point_id], with_payload=True)
+        if points:
+            return point_to_entity(points[0])
+    return None
+
+
+def upsert_entity(
+    client: QdrantClient, entity: Entity, vector: list[float], *, domain: str = "shared",
+) -> None:
+    """Upsert an entity into the appropriate (domain, kind) collection."""
+    kind = "decisions" if entity.type == "decision" else "entities"
+    point = entity_to_point(entity, vector)
+    client.upsert(collection_name=collection_name(domain, kind), points=[point])
+
+
+def delete_entity(
+    client: QdrantClient, entity_id: str, *, domain: str = "shared",
+) -> bool:
+    """Delete an entity by ID from the given domain. Returns True if found and deleted."""
+    point_id = entity_point_id(entity_id)
+    for kind in ("entities", "decisions"):
+        coll = collection_name(domain, kind)
+        if not client.collection_exists(coll):
+            continue
+        points = client.retrieve(collection_name=coll, ids=[point_id], with_payload=False)
+        if points:
+            client.delete(collection_name=coll, points_selector=[point_id])
             return True
     return False
 
 
 def scroll_entities(
-    client: QdrantClient, entity_type: str | None = None
+    client: QdrantClient, entity_type: str | None = None, *, domain: str = "shared",
 ) -> list[Entity]:
-    """Scroll through entities (and decisions) collection, optionally filtered by type."""
-    results = []
-    for collection in ["entities", "decisions"]:
-        if not client.collection_exists(collection):
+    """Scroll through entities + decisions in the given domain, optionally filtered by type."""
+    results: list[Entity] = []
+    for kind in ("entities", "decisions"):
+        coll = collection_name(domain, kind)
+        if not client.collection_exists(coll):
             continue
         scroll_filter = None
         if entity_type:
@@ -203,7 +234,7 @@ def scroll_entities(
         offset = None
         while True:
             points, next_offset = client.scroll(
-                collection_name=collection,
+                collection_name=coll,
                 scroll_filter=scroll_filter,
                 limit=100,
                 offset=offset,
@@ -221,36 +252,54 @@ def store_event(
     client: QdrantClient, event_id: str, text: str, vector: list[float],
     timestamp: str, source: str = "conversation", agent: str = "main",
     expires: str | None = None,
+    *,
+    domain: str = "shared",
+    run_id: str | None = None,
+    session_id: str | None = None,
+    profile: str | None = None,
+    trigger_source: str | None = None,
 ) -> None:
-    """Store a raw event in the events collection."""
-    point = PointStruct(
-        id=event_id,
-        vector=vector,
-        payload={
-            "text": text,
-            "timestamp": timestamp,
-            "source": source,
-            "agent": agent,
-            "extracted": False,
-            "expires": expires,
-        },
-    )
-    client.upsert(collection_name="events", points=[point])
+    """Store a raw event in the events collection of the given domain.
+
+    Provenance fields (run_id/session_id/profile/trigger_source) are
+    optional; legacy CLI callers leave them None and the payload omits
+    them on read for older rows.
+    """
+    payload = {
+        "text": text,
+        "timestamp": timestamp,
+        "source": source,
+        "agent": agent,
+        "extracted": False,
+        "expires": expires,
+    }
+    if run_id is not None:
+        payload["run_id"] = run_id
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if profile is not None:
+        payload["profile"] = profile
+    if trigger_source is not None:
+        payload["trigger_source"] = trigger_source
+
+    point = PointStruct(id=event_id, vector=vector, payload=payload)
+    client.upsert(collection_name=collection_name(domain, "events"), points=[point])
 
 
 def get_unextracted_events(
-    client: QdrantClient, since: datetime | None = None,
+    client: QdrantClient, since: datetime | None = None, *, domain: str = "shared",
 ) -> list[dict]:
-    """Get events where extracted=false, optionally filtered by time."""
-    conditions = [
-        FieldCondition(key="extracted", match=MatchValue(value=False)),
-    ]
+    """Get events where extracted=false, optionally filtered by time, in a domain."""
+    coll = collection_name(domain, "events")
+    if not client.collection_exists(coll):
+        return []
+    conditions = [FieldCondition(key="extracted", match=MatchValue(value=False))]
     scroll_filter = Filter(must=conditions)
-    results = []
+    results: list[dict] = []
     offset = None
     while True:
         points, next_offset = client.scroll(
-            collection_name="events",
+            collection_name=coll,
             scroll_filter=scroll_filter,
             limit=100,
             offset=offset,
@@ -258,7 +307,6 @@ def get_unextracted_events(
         )
         for p in points:
             payload = p.payload
-            # Apply time filter in code (Qdrant doesn't have great datetime filtering)
             if since is not None:
                 ts = datetime.fromisoformat(payload["timestamp"])
                 if ts < since:
@@ -270,19 +318,21 @@ def get_unextracted_events(
     return results
 
 
-def mark_event_extracted(client: QdrantClient, event_id: str) -> None:
-    """Mark an event as extracted."""
+def mark_event_extracted(
+    client: QdrantClient, event_id: str, *, domain: str = "shared",
+) -> None:
+    """Mark an event as extracted within its domain."""
     client.set_payload(
-        collection_name="events",
+        collection_name=collection_name(domain, "events"),
         payload={"extracted": True},
         points=[event_id],
     )
 
 
 def collection_stats(client: QdrantClient) -> dict[str, dict]:
-    """Get point counts and metadata for all collections."""
-    stats = {}
-    for name in COLLECTIONS:
+    """Get point counts and metadata for every (domain, kind) collection."""
+    stats: dict[str, dict] = {}
+    for name in ALL_COLLECTIONS:
         if client.collection_exists(name):
             info = client.get_collection(name)
             stats[name] = {"points": info.points_count}

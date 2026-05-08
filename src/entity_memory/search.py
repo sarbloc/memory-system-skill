@@ -14,7 +14,7 @@ from qdrant_client.models import (
     SearchParams,
 )
 
-from entity_memory.client import point_to_entity
+from entity_memory.client import collection_name, point_to_entity
 from entity_memory.models import Entity
 
 
@@ -34,8 +34,10 @@ def search_entities(
     embedder: EmbedderLike,
     entity_type: str | None = None,
     limit: int = 5,
+    *,
+    domain: str = "shared",
 ) -> list[SearchResult]:
-    """Search across entities and decisions collections.
+    """Search across entities and decisions collections within a domain.
 
     Uses dense vector search as primary, with optional type filter.
     Deduplicates results across collections by entity_id, keeping the higher score.
@@ -50,26 +52,26 @@ def search_entities(
 
     results_map: dict[str, SearchResult] = {}
 
-    for collection in ["entities", "decisions"]:
-        if not client.collection_exists(collection):
+    for kind in ("entities", "decisions"):
+        coll = collection_name(domain, kind)
+        if not client.collection_exists(coll):
             continue
 
-        hits = client.search(
-            collection_name=collection,
-            query_vector=query_vector,
+        hits = client.query_points(
+            collection_name=coll,
+            query=query_vector,
             query_filter=search_filter,
             limit=limit,
             with_payload=True,
         )
 
-        for hit in hits:
+        for hit in hits.points:
             entity = point_to_entity(hit)
             eid = entity.id
             if eid not in results_map or hit.score > results_map[eid].score:
                 results_map[eid] = SearchResult(entity=entity, score=hit.score)
 
-    # Also try text match for keyword fallback
-    text_results = _text_search(client, query, search_filter, limit)
+    text_results = _text_search(client, query, search_filter, limit, domain=domain)
     for sr in text_results:
         eid = sr.entity.id
         if eid not in results_map:
@@ -84,8 +86,10 @@ def _text_search(
     query: str,
     extra_filter: Filter | None,
     limit: int,
+    *,
+    domain: str = "shared",
 ) -> list[SearchResult]:
-    """Keyword fallback: search the text index on search_text field."""
+    """Keyword fallback: search the text index on search_text field within a domain."""
     results = []
     text_condition = FieldCondition(key="search_text", match=MatchText(text=query))
 
@@ -95,18 +99,18 @@ def _text_search(
 
     scroll_filter = Filter(must=conditions)
 
-    for collection in ["entities", "decisions"]:
-        if not client.collection_exists(collection):
+    for kind in ("entities", "decisions"):
+        coll = collection_name(domain, kind)
+        if not client.collection_exists(coll):
             continue
         points, _ = client.scroll(
-            collection_name=collection,
+            collection_name=coll,
             scroll_filter=scroll_filter,
             limit=limit,
             with_payload=True,
         )
         for p in points:
             entity = point_to_entity(p)
-            # Text matches get a fixed score of 0.5 (below typical vector matches)
             results.append(SearchResult(entity=entity, score=0.5))
 
     return results
