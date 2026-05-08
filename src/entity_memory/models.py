@@ -30,7 +30,13 @@ class Event:
     id: str  # UUID
     text: str
     timestamp: str  # ISO datetime
-    source: str  # conversation | task | cron
+    source: str  # conversation | task | cron (legacy categorisation)
     agent: str = "main"
     extracted: bool = False
     expires: Optional[str] = None  # ISO datetime
+    # Provenance fields added for Endurance integration. All optional;
+    # legacy callers (OpenClaw via the existing CLI) leave them None.
+    run_id: Optional[str] = None
+    session_id: Optional[str] = None
+    profile: Optional[str] = None
+    trigger_source: Optional[str] = None  # telegram_message | ha_motion | ...

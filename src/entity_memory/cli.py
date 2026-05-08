@@ -322,5 +322,13 @@ def import_cmd(file: str):
     click.echo(f"Imported {len(imported)} entities.")
 
 
+@main.command()
+def mcp():
+    """Run the MCP stdio server (used by Endurance and other MCP clients)."""
+    from entity_memory.mcp_server import run
+
+    run()
+
+
 if __name__ == "__main__":
     main()

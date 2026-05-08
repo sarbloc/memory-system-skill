@@ -40,7 +40,9 @@ pytest tests/test_merge.py::test_name  # single test
 
 ## Architecture
 
-Three Qdrant collections:
+Collections are organised on two axes — **domain** (`shared`, `dev`, `personal`) × **kind** (`entities`, `events`, `decisions`). Nine collections in total. The `shared` domain reuses the legacy bare names (`entities`, `events`, `decisions`) so OpenClaw and any other existing caller continue to work unchanged. The `dev` and `personal` domains use namespaced names (`dev_entities`, `personal_events`, etc.).
+
+The three kinds:
 - **`entities`** — long-term knowledge (person, project, tool, preference, decision). Upserted in place, never appended.
 - **`events`** — short-term observations (rolling 30-day window, auto-expires). Source material for entity extraction.
 - **`decisions`** — architectural/strategic choices. Same structure as entities but permanent, never expire.
@@ -50,13 +52,31 @@ Three Qdrant collections:
 | File | Purpose |
 |------|---------|
 | `cli.py` | Click CLI entry point for all commands |
-| `client.py` | Qdrant client wrapper, collection initialization |
+| `client.py` | Qdrant client wrapper, collection initialization, domain-aware CRUD |
 | `embedder.py` | sentence-transformers wrapper |
 | `models.py` | Dataclasses: Fact, Entity, Event |
 | `merge.py` | Merge, compact, dedup, search text generation |
 | `extract.py` | Event → entity extraction (sentence splitting, matching) |
 | `search.py` | Vector + text + filter search fusion |
 | `export.py` | Export/import (JSON and markdown formats) |
+| `mcp_server.py` | MCP stdio server (`memory mcp`) exposing operations as tools |
+
+### MCP entrypoint
+
+`memory mcp` runs an MCP stdio server using the official Python SDK (`mcp` package). Tools mirror the CLI verbs and add a `domain` parameter for routing:
+
+| Tool | Maps to |
+|------|---------|
+| `memory_store` | `memory store` |
+| `memory_get` | `memory get` |
+| `memory_list` | `memory list` |
+| `memory_search` | `memory search` |
+| `memory_event` | `memory event` (also accepts `run_id`/`session_id`/`profile`/`trigger_source` for provenance) |
+| `memory_extract` | `memory extract` |
+| `memory_embed` | direct embedder access (lets MCP clients reuse the same MiniLM model) |
+| `memory_stats` | `memory stats` |
+
+The CLI surface is unchanged: existing commands default to `domain="shared"` via the new kwargs in `client.py`. OpenClaw keeps working without modification.
 
 ### Core algorithms (all deterministic, no LLM)
 
