@@ -113,6 +113,7 @@ class TestMemoryExtractBurnFix:
             "events_processed": 0,
             "matched": 0,
             "unmatched": 0,
+            "matched_events": 0,
             "unmatched_samples": [],
         }
 

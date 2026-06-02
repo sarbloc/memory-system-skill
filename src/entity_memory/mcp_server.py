@@ -219,7 +219,13 @@ def memory_extract(
 
     events = get_unextracted_events(client, since=since_dt, domain=domain)
     if not events:
-        return {"events_processed": 0, "matched": 0, "unmatched": 0, "unmatched_samples": []}
+        return {
+            "events_processed": 0,
+            "matched": 0,
+            "unmatched": 0,
+            "matched_events": 0,
+            "unmatched_samples": [],
+        }
 
     entities = scroll_entities(client, domain=domain)
     now = datetime.utcnow()
