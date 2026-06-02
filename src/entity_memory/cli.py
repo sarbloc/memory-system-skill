@@ -4,8 +4,10 @@ import uuid
 from datetime import datetime, timedelta
 
 import click
+from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from entity_memory.client import (
+    collection_name,
     collection_stats,
     delete_entity,
     ensure_collections,
@@ -215,6 +217,89 @@ def extract(since: str | None, process_all: bool):
 
     for s in result.unmatched:
         click.echo(f"  UNMATCHED: \"{s}\"")
+
+
+@main.command(name="dismiss")
+@click.option(
+    "--source", "src", required=True,
+    help="Only dismiss unextracted events whose 'source' field equals this "
+         "(e.g. claude_ai_import_conversation).",
+)
+@click.option("--domain", default="shared", help="Domain: shared|dev|personal")
+@click.option(
+    "--keep", "keep", multiple=True,
+    help="Event ID to exclude from dismissal. Repeatable.",
+)
+@click.option(
+    "--apply", "apply_changes", is_flag=True,
+    help="Actually mark matched events extracted. Without this flag the command "
+         "is a dry-run (prints count + sample, writes nothing).",
+)
+def dismiss(src: str, domain: str, keep: tuple[str, ...], apply_changes: bool):
+    """Bulk-dismiss unextracted events by source, marking them extracted.
+
+    Built for one-time cleanup of bulk imports (e.g. the Claude.ai conversation
+    import) whose events are not memory-worthy: it marks them extracted=True
+    with no entity created, so the extractor stops reconsidering them. Events
+    are NOT deleted — their existing 30-day TTL still applies. Dry-run by
+    default; pass --apply to commit.
+    """
+    client = get_client()
+    coll = collection_name(domain, "events")
+    if not client.collection_exists(coll):
+        click.echo(f"No events collection for domain {domain!r}.")
+        raise SystemExit(1)
+
+    keep_set = set(keep)
+    scroll_filter = Filter(
+        must=[
+            FieldCondition(key="extracted", match=MatchValue(value=False)),
+            FieldCondition(key="source", match=MatchValue(value=src)),
+        ]
+    )
+
+    matched_ids: list = []
+    sample: list[tuple[str, str]] = []
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=coll, scroll_filter=scroll_filter,
+            limit=256, offset=offset, with_payload=True,
+        )
+        for p in points:
+            if str(p.id) in keep_set:
+                continue
+            matched_ids.append(p.id)
+            if len(sample) < 5:
+                text = (p.payload or {}).get("text", "")
+                sample.append((str(p.id), text.replace("\n", " ")[:100]))
+        if offset is None:
+            break
+
+    click.echo(
+        f"Matched {len(matched_ids)} unextracted events "
+        f"(source={src!r}, domain={domain!r}, {len(keep_set)} excluded)."
+    )
+    for eid, snippet in sample:
+        click.echo(f"  {eid}  {snippet}")
+    if len(matched_ids) > len(sample):
+        click.echo(f"  ... and {len(matched_ids) - len(sample)} more")
+
+    if not apply_changes:
+        click.echo("DRY-RUN: nothing written. Pass --apply to mark these extracted.")
+        return
+
+    if not matched_ids:
+        click.echo("Nothing to dismiss.")
+        return
+
+    batch = 500
+    for i in range(0, len(matched_ids), batch):
+        chunk = matched_ids[i : i + batch]
+        client.set_payload(
+            collection_name=coll, payload={"extracted": True}, points=chunk,
+        )
+    click.echo(f"Dismissed {len(matched_ids)} events (extracted=True).")
 
 
 @main.command(name="compact")
