@@ -31,9 +31,10 @@ class _FakeClient:
         # Single page; real filtering is Qdrant's job (see module docstring).
         return list(self._points), None
 
-    def set_payload(self, collection_name, payload, points):
+    def set_payload(self, collection_name, payload, points, wait=False):
         self.set_payload_calls.append(
-            {"collection": collection_name, "payload": payload, "points": list(points)}
+            {"collection": collection_name, "payload": payload,
+             "points": list(points), "wait": wait}
         )
 
 
@@ -75,6 +76,7 @@ def test_apply_marks_all_matched_extracted(monkeypatch):
     call = fake.set_payload_calls[0]
     assert call["payload"] == {"extracted": True}
     assert set(call["points"]) == {"id-0", "id-1", "id-2"}
+    assert call["wait"] is True  # one-shot CLI mutation must be durable on return
 
 
 def test_keep_excludes_listed_ids(monkeypatch):

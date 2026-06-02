@@ -298,6 +298,7 @@ def dismiss(src: str, domain: str, keep: tuple[str, ...], apply_changes: bool):
         chunk = matched_ids[i : i + batch]
         client.set_payload(
             collection_name=coll, payload={"extracted": True}, points=chunk,
+            wait=True,
         )
     click.echo(f"Dismissed {len(matched_ids)} events (extracted=True).")
 
