@@ -320,11 +320,20 @@ def get_unextracted_events(
 
 def mark_event_extracted(
     client: QdrantClient, event_id: str, *, domain: str = "shared",
+    resolved_into: str | None = None,
 ) -> None:
-    """Mark an event as extracted within its domain."""
+    """Mark an event as extracted within its domain.
+
+    If ``resolved_into`` is given, also records which entity the event fed
+    (provenance) on the event payload, so a resolved event points at the
+    entity created/updated from it.
+    """
+    payload: dict = {"extracted": True}
+    if resolved_into is not None:
+        payload["resolved_into"] = resolved_into
     client.set_payload(
         collection_name=collection_name(domain, "events"),
-        payload={"extracted": True},
+        payload=payload,
         points=[event_id],
     )
 

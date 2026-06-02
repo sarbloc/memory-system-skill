@@ -1,8 +1,16 @@
 """Event → entity extraction logic.
 
 Splits event text into sentences, matches each against existing entities.
-Matched sentences are merged as new facts. Unmatched sentences are logged
-as candidates but NOT auto-created as entities.
+Matched sentences are merged as new facts (enrichment of existing entities).
+Unmatched sentences are returned as candidates but NOT auto-created as
+entities here — entity *creation* is deliberately left to an external LLM
+agent (via the ``memory_store`` tool). This module stays dependency-light
+(local embedder only) and does mechanical cosine matching for enrichment.
+
+``ExtractionResult.matched_event_ids`` records which events had at least one
+sentence match an existing entity, so callers can mark *only* those events
+extracted and leave fully-unmatched events as new-entity candidates rather
+than silently burning them.
 """
 
 from __future__ import annotations
@@ -27,6 +35,7 @@ class ExtractionResult:
     matched: list[tuple[str, Entity]]  # (sentence, matched entity)
     unmatched: list[str]  # sentences with no entity match
     events_processed: int
+    matched_event_ids: set[str]  # ids of events with >=1 sentence matched to an entity
 
 
 def split_sentences(text: str) -> list[str]:
@@ -101,6 +110,7 @@ def extract_events(
 
     matched = []
     unmatched = []
+    matched_event_ids: set[str] = set()
 
     for event in events:
         sentences = split_sentences(event["text"])
@@ -108,6 +118,7 @@ def extract_events(
             entity = match_sentence_to_entity(sentence, entities, embedder)
             if entity is not None:
                 matched.append((sentence, entity))
+                matched_event_ids.add(event["id"])
             else:
                 unmatched.append(sentence)
 
@@ -115,4 +126,5 @@ def extract_events(
         matched=matched,
         unmatched=unmatched,
         events_processed=len(events),
+        matched_event_ids=matched_event_ids,
     )
