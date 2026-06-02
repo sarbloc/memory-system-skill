@@ -219,7 +219,13 @@ def memory_extract(
 
     events = get_unextracted_events(client, since=since_dt, domain=domain)
     if not events:
-        return {"events_processed": 0, "matched": 0, "unmatched": 0, "unmatched_samples": []}
+        return {
+            "events_processed": 0,
+            "matched": 0,
+            "unmatched": 0,
+            "matched_events": 0,
+            "unmatched_samples": [],
+        }
 
     entities = scroll_entities(client, domain=domain)
     now = datetime.utcnow()
@@ -232,15 +238,59 @@ def memory_extract(
         vector = embedder.embed(build_search_text(merged))
         upsert_entity(client, merged, vector, domain=domain)
 
-    for ev in events:
-        mark_event_extracted(client, ev["id"], domain=domain)
+    # Mark extracted ONLY events that enriched an existing entity (>=1 sentence
+    # matched). Fully-unmatched events stay unextracted so an external LLM agent
+    # can turn them into new entities via memory_store, then call
+    # memory_event_resolve. (Tradeoff: an event with a MIX of matched and
+    # unmatched sentences is marked extracted because >=1 matched, so its
+    # unmatched sentences are not separately surfaced. Acceptable for now.)
+    for event_id in result.matched_event_ids:
+        mark_event_extracted(client, event_id, domain=domain)
 
     return {
         "events_processed": result.events_processed,
         "matched": len(result.matched),
         "unmatched": len(result.unmatched),
+        "matched_events": len(result.matched_event_ids),
         "unmatched_samples": result.unmatched[:10],
     }
+
+
+@mcp.tool()
+def memory_events_unextracted(domain: str = "shared", limit: int = 50) -> dict[str, Any]:
+    """List raw events not yet extracted into entities, oldest first, within a domain.
+
+    Use this to find events that need turning into entities (via memory_store).
+    Returns {"events": [{"id": str, "text": str, "timestamp": str}], "returned": int}.
+    """
+    _validate_domain(domain)
+    client = get_client()
+    events = get_unextracted_events(client, since=None, domain=domain)
+    events.sort(key=lambda e: e.get("timestamp", ""))
+    sliced = events[:limit]
+    projected = [
+        {"id": e["id"], "text": e["text"], "timestamp": e.get("timestamp", "")}
+        for e in sliced
+    ]
+    return {"events": projected, "returned": len(projected)}
+
+
+@mcp.tool()
+def memory_event_resolve(
+    event_id: str, domain: str = "shared", created_entity_id: str | None = None,
+) -> dict[str, Any]:
+    """Mark a raw event as extracted/resolved, optionally recording which entity it fed.
+
+    Call after creating/updating an entity from the event (pass created_entity_id),
+    or to dismiss a non-memory-worthy event (omit created_entity_id).
+    Returns {"resolved": event_id, "created_entity_id": created_entity_id}.
+    """
+    _validate_domain(domain)
+    client = get_client()
+    mark_event_extracted(
+        client, event_id, domain=domain, resolved_into=created_entity_id,
+    )
+    return {"resolved": event_id, "created_entity_id": created_entity_id}
 
 
 @mcp.tool()

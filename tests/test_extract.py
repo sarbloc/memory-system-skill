@@ -103,3 +103,45 @@ class TestExtractEvents:
         ]
         result = extract_events(events, [], embedder, now=NOW)
         assert result.events_processed == 2
+
+    def test_matched_event_ids_empty_when_no_entities(self, embedder):
+        # No entities to match against → nothing can match → set is empty.
+        events = [{"id": "e1", "text": "Alice reviewed the PR. Bob approved it."}]
+        result = extract_events(events, [], embedder, now=NOW)
+        assert result.matched_event_ids == set()
+
+    def test_matched_event_ids_includes_matching_event(self, embedder):
+        from entity_memory.merge import build_search_text
+
+        entity = _entity("person:alice", "person", ["Manages the auth team"])
+        # An event whose sentence equals the entity's search_text matches
+        # deterministically (identical text → cosine 1.0 with MockEmbedder).
+        matching_sentence = build_search_text(entity)
+        events = [{"id": "e1", "text": matching_sentence}]
+        result = extract_events(events, [entity], embedder, now=NOW)
+        assert "e1" in result.matched_event_ids
+        assert len(result.matched) >= 1
+
+    def test_fully_unmatched_event_absent_from_matched_ids(self, embedder):
+        # Two events, one guaranteed match (== search_text), one guaranteed
+        # non-match (cosine < threshold vs the only entity present).
+        from entity_memory.extract import cosine_sim
+        from entity_memory.merge import build_search_text
+
+        entity = _entity("person:alice", "person", ["Manages the auth team"])
+        st = build_search_text(entity)
+        unmatched_text = "grok quaffle."  # verified cosine < 0.7 vs this entity
+        # Guard: if the mock embedder ever changes and this accidentally
+        # matches, skip rather than assert a false negative.
+        if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
+            import pytest
+
+            pytest.skip("Mock embedder changed: chosen text now matches")
+
+        events = [
+            {"id": "match", "text": st},
+            {"id": "nomatch", "text": unmatched_text},
+        ]
+        result = extract_events(events, [entity], embedder, now=NOW)
+        assert "match" in result.matched_event_ids
+        assert "nomatch" not in result.matched_event_ids
