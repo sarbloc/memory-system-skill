@@ -257,15 +257,25 @@ def memory_extract(
 
 
 @mcp.tool()
-def memory_events_unextracted(domain: str = "shared", limit: int = 50) -> dict[str, Any]:
+def memory_events_unextracted(
+    domain: str = "shared", limit: int = 50, since_minutes: int | None = None,
+) -> dict[str, Any]:
     """List raw events not yet extracted into entities, oldest first, within a domain.
 
     Use this to find events that need turning into entities (via memory_store).
+    When since_minutes is set, only events newer than that many minutes ago are
+    returned (e.g. since_minutes=1440 for the last 24h); otherwise the whole
+    unextracted backlog is considered. Results are oldest-first either way.
     Returns {"events": [{"id": str, "text": str, "timestamp": str}], "returned": int}.
     """
     _validate_domain(domain)
     client = get_client()
-    events = get_unextracted_events(client, since=None, domain=domain)
+    since = (
+        datetime.utcnow() - timedelta(minutes=since_minutes)
+        if since_minutes is not None
+        else None
+    )
+    events = get_unextracted_events(client, since=since, domain=domain)
     events.sort(key=lambda e: e.get("timestamp", ""))
     sliced = events[:limit]
     projected = [

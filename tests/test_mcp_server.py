@@ -17,6 +17,7 @@ does in production.
 """
 
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -162,6 +163,25 @@ class TestMemoryEventsUnextracted:
         assert out["returned"] == 2
         # Limit keeps the two oldest.
         assert [e["id"] for e in out["events"]] == ids[:2]
+
+    def test_since_minutes_filters_old(self, mcp_env, embedder):
+        client = mcp_env
+        # since_minutes is relative to real utcnow(), so seed timestamps
+        # relative to now rather than the fixed NOW_ISO used elsewhere.
+        now = datetime.utcnow()
+        recent = _seed_event(
+            client, embedder, "recent.",
+            timestamp=(now - timedelta(minutes=10)).isoformat(),
+        )
+        old = _seed_event(
+            client, embedder, "stale.",
+            timestamp=(now - timedelta(days=3)).isoformat(),
+        )
+        out = mcp_server.memory_events_unextracted(domain="shared", since_minutes=1440)
+        ids = [e["id"] for e in out["events"]]
+        assert out["returned"] == 1
+        assert recent in ids
+        assert old not in ids
 
 
 # ── memory_event_resolve ─────────────────────────────────
