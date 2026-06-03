@@ -101,13 +101,12 @@ def merge(
 
     for new_fact in new_facts:
         ensure_embedded(new_fact, embedder)
-        # Dedup only against facts valid *today* (issue #21). Superseded/expired
-        # history is immutable: a re-asserted fact must not revive or mutate it —
-        # it appends as a new current fact instead, leaving the historical record
-        # intact for as-of queries. Using valid_at (not is_current) keeps a fact
-        # whose supersession is future-effective as a dedup target until its date.
-        live = [f for f in entity.facts if f.valid_at(today)]
-        dupe = find_duplicate(new_fact, live, embedder)
+        # Dedup only against *current* facts (issue #21). Superseded facts are
+        # immutable history: a re-asserted fact must not revive or mutate them —
+        # it appends as a new current fact instead, leaving the historical
+        # record intact for as-of queries.
+        current = [f for f in entity.facts if f.is_current]
+        dupe = find_duplicate(new_fact, current, embedder)
 
         if dupe is not None:
             dupe.hit_count += 1
@@ -162,14 +161,9 @@ def build_search_text(entity: Entity, now: datetime | None = None) -> str:
     (issue #21) so stale state stops feeding the entity's search vector.
     """
     now = now or datetime.utcnow()
-    today = now.date().isoformat()
     parts = [f"[{entity.type}] {entity.id}"]
-    # Facts valid as of today drive the vector. Using valid_at (not is_current)
-    # means a fact superseded with a *future* effective date keeps feeding the
-    # index until that date, instead of dropping out the moment supersession is
-    # recorded (issue #21, Codex review of PR #23).
-    valid = [f for f in entity.facts if f.valid_at(today)]
-    sorted_facts = sorted(valid, key=lambda f: fact_score(f, now), reverse=True)
+    current = [f for f in entity.facts if f.is_current]
+    sorted_facts = sorted(current, key=lambda f: fact_score(f, now), reverse=True)
     for f in sorted_facts[:10]:
         parts.append(f.text)
     return ". ".join(parts)

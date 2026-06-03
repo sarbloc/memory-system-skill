@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol
 
 from qdrant_client import QdrantClient
@@ -29,22 +28,31 @@ class SearchResult:
     score: float
 
 
-def _project_temporal(entity: Entity, as_of: str) -> Entity:
-    """Return ``entity`` with its facts projected to the view at ``as_of`` (#21).
+def _project_temporal(entity: Entity, as_of: str | None) -> Entity:
+    """Return ``entity`` with its facts projected to a temporal view (issue #21).
 
-    Keeps only facts in effect on that ISO date — ``valid_at`` handles the full
-    bi-temporal window (valid_from start, supersession end, TTL expiry). The
-    default view passes today's date, so a fact superseded with a *future*
-    effective date stays visible until that date arrives rather than vanishing
-    the instant supersession is recorded. Mutates the (throwaway) entity built by
-    ``point_to_entity`` — safe because each search rebuilds entities freshly.
+    Default (``as_of is None``): drop superseded facts so recall reflects current
+    state. With ``as_of`` set: keep only facts in effect on that ISO date, so the
+    caller sees the entity as it was then. Mutates the (throwaway) entity built
+    by ``point_to_entity`` — safe because each search rebuilds entities freshly.
 
     Note: ranking still comes from the stored "now" vector; only the *returned
     facts* are time-shifted. Reconstructing historical ranking would need a
     historical vector, which we deliberately don't keep.
     """
-    entity.facts = [f for f in entity.facts if f.valid_at(as_of)]
+    if as_of is None:
+        entity.facts = [f for f in entity.facts if f.is_current]
+    else:
+        entity.facts = [f for f in entity.facts if f.valid_at(as_of)]
     return entity
+
+
+def _collection_size(client: QdrantClient, coll: str) -> int:
+    """Exact point count for a collection, or 0 if it doesn't exist/errors."""
+    try:
+        return client.count(collection_name=coll, exact=True).count
+    except Exception:
+        return 0
 
 
 def search_entities(
@@ -62,14 +70,13 @@ def search_entities(
     Uses dense vector search as primary, with optional type filter.
     Deduplicates results across collections by entity_id, keeping the higher score.
 
-    Each result's facts are projected to the view at ``as_of`` (an ISO date),
-    defaulting to today — so recall reflects what is valid right now, and a
-    fact superseded with a future effective date stays visible until then
-    (issue #21). Entities with no facts valid at that date are dropped. Use
-    ``memory_get`` for the full, unfiltered record.
+    Each result's facts are projected to a temporal view: superseded facts are
+    hidden by default; pass ``as_of`` (ISO date) to see each entity as it was on
+    that date (issue #21). Entities with no facts valid at that date are dropped,
+    and the limit is applied AFTER projection so they don't squat the top slots.
+    Use ``memory_get`` for the full, unfiltered record.
     """
     query_vector = embedder.embed(query)
-    effective_as_of = as_of or datetime.utcnow().date().isoformat()
 
     search_filter = None
     if entity_type:
@@ -77,12 +84,21 @@ def search_entities(
             must=[FieldCondition(key="type", match=MatchValue(value=entity_type))]
         )
 
-    # Over-fetch a wider candidate pool, because temporal projection can empty an
-    # entity's fact list (e.g. it had nothing valid at ``as_of``). We must project
-    # and drop the empties BEFORE applying the caller's limit, or those empty hits
-    # would squat top slots and crowd out entities actually valid then (issue #21,
-    # Codex review of PR #23).
-    fetch_limit = max(limit * 5, limit)
+    # Temporal projection can empty an entity's fact list, so we must project and
+    # drop the empties BEFORE applying the caller's limit (issue #21). For a
+    # historical ``as_of`` query the valid set may be a small slice of a large
+    # history, so we rank the whole (small) collection to avoid under-returning
+    # when many top-ranked hits are empty then; the default "now" view rarely
+    # empties, so a modest over-fetch suffices (Codex review of PR #23).
+    if as_of is not None:
+        fetch_limit = max(
+            (_collection_size(client, collection_name(domain, k))
+             for k in ("entities", "decisions")),
+            default=limit,
+        )
+        fetch_limit = max(fetch_limit, limit)
+    else:
+        fetch_limit = max(limit * 2, limit)
 
     results_map: dict[str, SearchResult] = {}
 
@@ -115,7 +131,7 @@ def search_entities(
 
     projected: list[SearchResult] = []
     for r in ranked:
-        _project_temporal(r.entity, effective_as_of)
+        _project_temporal(r.entity, as_of)
         if r.entity.facts:
             projected.append(r)
         if len(projected) >= limit:

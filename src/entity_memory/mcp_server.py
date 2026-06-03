@@ -115,6 +115,16 @@ def memory_store(
     now = datetime.utcnow()
     today = now.date().isoformat()
 
+    # Future-effective dating (a valid_from past today) is a scheduling feature
+    # beyond this system's scope: the live view assumes is_current == valid-now,
+    # which only holds for backdated/same-day facts. Reject rather than half-apply
+    # it (tracked in issue #24).
+    if valid_from is not None and valid_from[:10] > today:
+        raise ValueError(
+            f"future valid_from {valid_from!r} is not supported yet (today is "
+            f"{today}); future-effective dating is tracked in issue #24"
+        )
+
     existing = get_entity(client, full_id, domain=domain)
     if existing is None:
         existing = Entity(id=full_id, type=entity_type)

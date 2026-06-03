@@ -243,12 +243,12 @@ class TestMemoryStoreSupersession:
         mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
         mcp_server.memory_store(
             "person", "alice", "lives in Berlin", domain="shared",
-            supersedes="lives in London", valid_from="2026-06-01",
+            supersedes="lives in London", valid_from="2026-01-01",
         )
         ent = mcp_server.memory_get("person:alice", domain="shared")
         by_text = {f["text"]: f for f in ent["facts"]}
-        assert by_text["lives in London"]["superseded_at"] == "2026-06-01"
-        assert by_text["lives in Berlin"]["valid_from"] == "2026-06-01"
+        assert by_text["lives in London"]["superseded_at"] == "2026-01-01"
+        assert by_text["lives in Berlin"]["valid_from"] == "2026-01-01"
 
     def test_supersedes_no_match_reports_none(self, mcp_env):
         out = mcp_server.memory_store(
@@ -293,26 +293,17 @@ class TestMemoryStoreSupersession:
         alice_now = next(h for h in cur if h["id"] == "person:alice")
         assert {f["text"] for f in alice_now["facts"]} == {"lives in Berlin"}
 
-    def test_future_supersession_stays_visible_until_date(self, mcp_env):
-        # A supersession with a future effective date must NOT hide the old fact
-        # now — the change hasn't happened yet (Codex review, PR #23). Far-future
-        # date so it is always ahead of the real test-run "today".
+    def test_future_valid_from_rejected(self, mcp_env):
+        # Future-effective dating is out of scope for now: the live view assumes
+        # is_current == valid-now, which only holds for backdated/same-day facts.
+        # memory_store must reject a future valid_from rather than half-apply it
+        # (issue #24). Far-future date so it is always ahead of the real "today".
         mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
-        mcp_server.memory_store(
-            "person", "alice", "lives in Berlin", domain="shared",
-            supersedes="lives in London", valid_from="2099-01-01",
-        )
-        # Default (today): London still in effect; Berlin not yet.
-        hits = mcp_server.memory_search("alice", domain="shared")
-        alice = next(h for h in hits if h["id"] == "person:alice")
-        texts = {f["text"] for f in alice["facts"]}
-        assert "lives in London" in texts
-        assert "lives in Berlin" not in texts
-
-        # As of after the effective date: Berlin in effect, London retired.
-        future = mcp_server.memory_search("alice", domain="shared", as_of="2099-02-01")
-        alice_future = next(h for h in future if h["id"] == "person:alice")
-        assert {f["text"] for f in alice_future["facts"]} == {"lives in Berlin"}
+        with pytest.raises(ValueError):
+            mcp_server.memory_store(
+                "person", "alice", "lives in Berlin", domain="shared",
+                supersedes="lives in London", valid_from="2099-01-01",
+            )
 
 
 # ── as_of search: filter empties before applying the limit (issue #21) ──
@@ -320,23 +311,26 @@ class TestMemoryStoreSupersession:
 class TestSearchTemporalLimit:
     def test_as_of_drops_empties_before_limit(self, mcp_env, embedder):
         client = mcp_env
-        # Four entities matching "status report" but all superseded before the
-        # as_of date (so they project to empty), plus one still valid then. With
-        # limit=1 the valid one must win — empties must not consume the slot
-        # (Codex review of PR #23). Old code sliced to limit BEFORE projecting and
-        # would return an empty-fact hit instead.
+        # Four CURRENT entities matching "status report" but only valid from a
+        # date AFTER the as_of (so they project to empty for that historical
+        # query), plus one valid then. They are current → they DO feed the vector
+        # and rank highly, so at limit=1 the projected-empty ones must not consume
+        # the slot (Codex review of PR #23). Old code sliced to limit BEFORE
+        # projecting and would return an empty-fact hit instead. Seeded via
+        # upsert_entity to bypass the future-valid_from store guard (issue #24);
+        # 2026-05-01 is past the real "today" but ahead of the as_of date.
         for i in range(4):
             e = Entity(
-                id=f"project:dead{i}", type="project",
+                id=f"project:future{i}", type="project",
                 facts=[Fact(
-                    text=f"status report {i}", added="2026-01-01", source="t",
-                    last_seen="2026-01-01", superseded_at="2026-02-01",
+                    text=f"status report {i}", added="2026-05-01", source="t",
+                    last_seen="2026-05-01", valid_from="2026-05-01",
                 )],
-                last_updated="2026-01-01T00:00:00",
+                last_updated="2026-05-01T00:00:00",
             )
             upsert_entity(
                 client, e,
-                embedder.embed(build_search_text(e, now=datetime(2026, 1, 1))),
+                embedder.embed(build_search_text(e, now=datetime(2026, 5, 1))),
                 domain="shared",
             )
         alive = Entity(

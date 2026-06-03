@@ -83,6 +83,13 @@ def store(entity_type: str, entity_id: str, content: str, supersedes: str | None
     now = datetime.utcnow()
     today = now.date().isoformat()
 
+    # Future-effective dating isn't supported yet (issue #24) — see memory_store.
+    if valid_from is not None and valid_from[:10] > today:
+        raise click.ClickException(
+            f"future valid_from {valid_from!r} is not supported yet (today is "
+            f"{today}); future-effective dating is tracked in issue #24"
+        )
+
     existing = get_entity(client, full_id)
     if existing is None:
         existing = Entity(id=full_id, type=entity_type)
