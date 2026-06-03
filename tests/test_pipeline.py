@@ -20,7 +20,6 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
-from entity_memory.extract import cosine_sim
 from entity_memory.merge import build_search_text
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import run_extraction
@@ -83,17 +82,15 @@ def test_batch_size_must_be_positive(store, embedder):
 
 def test_burn_fix_holds_with_batching(store, embedder):
     """A fully-unmatched event survives even when batched one-per-batch."""
-    # "Manages the auth team" is the entity text proven not to collide with
-    # "grok quaffle." under the hash-based MockEmbedder (see test_extract.py).
+    # Gate at 0.95 so only identical text matches: the MockEmbedder's
+    # all-positive vectors floor cosine near 0.7, so a distinct string can't be
+    # forced below a 0.7 default gate — a high gate is the deterministic lever.
     _, st = _seed_entity(store, embedder, "person:alice", "person", ["Manages the auth team"])
-    matched_id = _seed_event(store, embedder, st)  # == search_text → matches
+    matched_id = _seed_event(store, embedder, st)  # fact sentence hits the fact row → matches
 
-    unmatched_text = "grok quaffle."
-    if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
-        pytest.skip("Mock embedder changed: chosen text now matches")
-    unmatched_id = _seed_event(store, embedder, unmatched_text)
+    unmatched_id = _seed_event(store, embedder, "grok quaffle.")  # distinct → no match at 0.95
 
-    summary = run_extraction(store, embedder, batch_size=1)
+    summary = run_extraction(store, embedder, batch_size=1, threshold=0.95)
 
     assert summary["events_processed"] == 2
     assert summary["matched_events"] == 1
@@ -146,15 +143,13 @@ def test_per_batch_commit_survives_midrun_failure(store, embedder):
 
 
 def test_unmatched_samples_capped_at_ten(store, embedder):
-    _, st = _seed_entity(store, embedder, "person:alice", "person", ["Manages the auth team"])
-    # 15 events that do not match the entity → 15 unmatched sentences.
-    unmatched_text = "grok quaffle."
-    if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
-        pytest.skip("Mock embedder changed: chosen text now matches")
+    _seed_entity(store, embedder, "person:alice", "person", ["Manages the auth team"])
+    # 15 events that do not match the entity → 15 unmatched sentences. Gate at
+    # 0.95 (see test_burn_fix_holds_with_batching) so the distinct text can't match.
     for _ in range(15):
-        _seed_event(store, embedder, unmatched_text)
+        _seed_event(store, embedder, "grok quaffle.")
 
-    summary = run_extraction(store, embedder, batch_size=4)
+    summary = run_extraction(store, embedder, batch_size=4, threshold=0.95)
 
     assert summary["unmatched"] == 15
     assert summary["matched_events"] == 0

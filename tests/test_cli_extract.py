@@ -23,7 +23,6 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
-from entity_memory.extract import cosine_sim
 from entity_memory.merge import build_search_text
 from entity_memory.models import Entity, Fact
 
@@ -82,16 +81,14 @@ def test_unmatched_event_not_burned(cli_env, embedder):
         client, embedder, "person:alice", "person", ["Manages the auth team"]
     )
 
-    # A sentence equal to the entity's search_text matches deterministically.
+    # The blob's fact sentence equals a fact row → matches deterministically.
     matched_id = _seed_event(client, embedder, st)
 
-    # A fully-unmatched event: cosine < threshold vs the only entity present.
-    unmatched_text = "grok quaffle."
-    if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
-        pytest.skip("Mock embedder changed: chosen text now matches")
-    unmatched_id = _seed_event(client, embedder, unmatched_text)
+    # A distinct event that won't match at a 0.95 gate: MockEmbedder cosines
+    # floor near 0.7, so only identical text clears 0.95 (see test_pipeline).
+    unmatched_id = _seed_event(client, embedder, "grok quaffle.")
 
-    result = CliRunner().invoke(main, ["extract", "--all"])
+    result = CliRunner().invoke(main, ["extract", "--all", "--threshold", "0.95"])
     assert result.exit_code == 0, result.output
     assert "Processed 2 events" in result.output
 
@@ -135,3 +132,23 @@ def test_batch_flag_reports_progress(cli_env, embedder):
     assert result.exit_code == 0, result.output
     assert "Processed 3 events" in result.output
     assert "batch 1/3" in result.output  # progress emitted per batch
+
+
+def test_threshold_flag_moves_the_gate(cli_env, embedder):
+    """--threshold actually changes the match gate, not just accepted.
+
+    "grok quaffle." scores ~0.77 against the fact under MockEmbedder — above a
+    0.6 gate, below a 0.9 gate. So the same event enriches at 0.6 and survives
+    at 0.9, proving the flag is plumbed through to the matcher.
+    """
+    client = cli_env
+    _seed_entity(client, embedder, "person:alice", "person", ["Manages the auth team"])
+    ev = _seed_event(client, embedder, "grok quaffle.")
+
+    high = CliRunner().invoke(main, ["extract", "--all", "--threshold", "0.9"])
+    assert high.exit_code == 0, high.output
+    assert ev in {e["id"] for e in get_unextracted_events(client)}  # gate too high → survives
+
+    low = CliRunner().invoke(main, ["extract", "--all", "--threshold", "0.6"])
+    assert low.exit_code == 0, low.output
+    assert ev not in {e["id"] for e in get_unextracted_events(client)}  # gate low → enriched

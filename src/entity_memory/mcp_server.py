@@ -29,6 +29,7 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
+from entity_memory.extract import MATCH_THRESHOLD
 from entity_memory.merge import build_search_text, compact, merge
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
@@ -208,6 +209,7 @@ def memory_extract(
     since_minutes: int | None = None,
     process_all: bool = False,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    threshold: float = MATCH_THRESHOLD,
 ) -> dict[str, Any]:
     """Process unextracted events into entity upserts within a domain.
 
@@ -219,6 +221,10 @@ def memory_extract(
     (Tradeoff: an event with a MIX of matched and unmatched sentences is marked
     extracted because >=1 matched, so its unmatched sentences are not separately
     surfaced. Acceptable for now.)
+
+    ``threshold`` is the cosine gate for a sentence→fact match (default: the
+    tuned MATCH_THRESHOLD). Lower it to enrich more aggressively at the risk of
+    attaching facts to a near-but-wrong neighbour.
     """
     _validate_domain(domain)
     client = get_client()
@@ -229,7 +235,8 @@ def memory_extract(
         since_dt = datetime.utcnow() - timedelta(minutes=since_minutes)
 
     return run_extraction(
-        client, embedder, domain=domain, since=since_dt, batch_size=batch_size,
+        client, embedder, domain=domain, since=since_dt,
+        batch_size=batch_size, threshold=threshold,
     )
 
 

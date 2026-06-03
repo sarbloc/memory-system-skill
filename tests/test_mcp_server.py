@@ -23,7 +23,6 @@ import pytest
 
 from entity_memory import mcp_server
 from entity_memory.client import ALL_COLLECTIONS, store_event, upsert_entity
-from entity_memory.extract import cosine_sim
 from entity_memory.merge import build_search_text
 from entity_memory.models import Entity, Fact
 
@@ -83,20 +82,20 @@ def _seed_entity(client, embedder, eid, etype, fact_texts, *, domain="shared"):
 class TestMemoryExtractBurnFix:
     def test_only_matched_events_marked_extracted(self, mcp_env, embedder):
         client = mcp_env
-        entity, st = _seed_entity(
+        _, st = _seed_entity(
             client, embedder, "person:alice", "person", ["Manages the auth team"]
         )
 
-        # A sentence equal to the entity's search_text matches deterministically.
+        # The blob's fact sentence equals a fact row → matches deterministically.
         matched_id = _seed_event(client, embedder, st)
 
-        # A fully-unmatched event: cosine < threshold vs the only entity present.
-        unmatched_text = "grok quaffle."
-        if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
-            pytest.skip("Mock embedder changed: chosen text now matches")
-        unmatched_id = _seed_event(client, embedder, unmatched_text)
+        # A distinct event that won't match at a 0.95 gate: MockEmbedder cosines
+        # floor near 0.7, so only identical text clears 0.95 (see test_pipeline).
+        unmatched_id = _seed_event(client, embedder, "grok quaffle.")
 
-        result = mcp_server.memory_extract(domain="shared", process_all=True)
+        result = mcp_server.memory_extract(
+            domain="shared", process_all=True, threshold=0.95
+        )
 
         assert result["events_processed"] == 2
         assert result["matched_events"] == 1
