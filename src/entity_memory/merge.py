@@ -100,12 +100,42 @@ def merge(
     entity.facts = drop_expired(entity.facts, now)
 
     for new_fact in new_facts:
+        # An incoming fact that is ALREADY superseded is immutable history (e.g.
+        # replayed from a backup import). It must never dedup/merge into a current
+        # fact — that would drop its supersession metadata — so append it straight
+        # to history, deduped against existing history by (text, superseded_at) so
+        # a repeated import stays idempotent (issue #21). No embedding needed:
+        # history doesn't feed the current vector.
+        if not new_fact.is_current:
+            already = any(
+                f.text == new_fact.text
+                and f.superseded_at == new_fact.superseded_at
+                for f in entity.facts
+                if not f.is_current
+            )
+            if not already:
+                entity.facts.append(new_fact)
+            continue
+
         ensure_embedded(new_fact, embedder)
-        dupe = find_duplicate(new_fact, entity.facts, embedder)
+        # Dedup only against *current* facts (issue #21). Superseded facts are
+        # immutable history: a re-asserted fact must not revive or mutate them —
+        # it appends as a new current fact instead, leaving the historical
+        # record intact for as-of queries.
+        current = [f for f in entity.facts if f.is_current]
+        dupe = find_duplicate(new_fact, current, embedder)
 
         if dupe is not None:
             dupe.hit_count += 1
             dupe.last_seen = today
+            # Keep the earliest known valid-time start. A re-assertion that
+            # carries an earlier valid_from means we learned the fact was true
+            # sooner than recorded; widening the window backwards must not be
+            # lost just because the texts deduped (issue #21).
+            if new_fact.valid_from is not None:
+                existing_start = dupe.valid_from or dupe.added
+                if new_fact.valid_from < existing_start:
+                    dupe.valid_from = new_fact.valid_from
             if len(new_fact.text) > len(dupe.text):
                 dupe.text = new_fact.text
                 dupe.embedding = new_fact.embedding
@@ -120,13 +150,21 @@ def merge(
 def compact(entity: Entity, max_facts: int = MAX_FACTS, now: datetime | None = None) -> Entity:
     """Trim facts to max_facts by keeping the highest-scored ones.
 
-    Score = frequency × recency × permanence (see fact_score).
+    Current facts always outrank superseded ones, so historical facts are the
+    first to drop when over the limit (issue #21); within each group the order
+    is by score (frequency × recency × permanence — see fact_score). Superseded
+    facts are only retained if there is room left after every current fact,
+    preserving recent history for as-of queries without crowding out live facts.
     """
     if len(entity.facts) <= max_facts:
         return entity
 
     now = now or datetime.utcnow()
-    scored = sorted(entity.facts, key=lambda f: fact_score(f, now), reverse=True)
+    scored = sorted(
+        entity.facts,
+        key=lambda f: (f.is_current, fact_score(f, now)),
+        reverse=True,
+    )
     entity.facts = scored[:max_facts]
     entity.last_updated = now.isoformat()
     return entity
@@ -136,11 +174,39 @@ def build_search_text(entity: Entity, now: datetime | None = None) -> str:
     """Build the search text string used for the entity's dense vector in Qdrant.
 
     Format: "[{type}] {entity_id}. {fact_1}. {fact_2}. ... {fact_10}"
-    Facts sorted by score, top 10.
+    Current facts only, sorted by score, top 10. Superseded facts are excluded
+    (issue #21) so stale state stops feeding the entity's search vector.
     """
     now = now or datetime.utcnow()
     parts = [f"[{entity.type}] {entity.id}"]
-    sorted_facts = sorted(entity.facts, key=lambda f: fact_score(f, now), reverse=True)
+    current = [f for f in entity.facts if f.is_current]
+    sorted_facts = sorted(current, key=lambda f: fact_score(f, now), reverse=True)
     for f in sorted_facts[:10]:
         parts.append(f.text)
     return ". ".join(parts)
+
+
+def mark_superseded(
+    entity: Entity, target: str, *, by: str, on_date: str
+) -> Optional[Fact]:
+    """Mark the current fact identified by ``target`` as superseded.
+
+    ``target`` matches a current fact by exact text. The first matching current
+    fact gets ``superseded_at = on_date`` and
+    ``superseded_by = by`` (the replacing fact's text). Already-superseded facts
+    are skipped. Returns the fact that was superseded, or None if nothing
+    matched.
+
+    Deterministic by design (issue #21): this records a supersession the caller
+    has already decided on. The core never *infers* that one fact supersedes
+    another — that semantic judgement is the LLM agent's job, mirroring how
+    extract.py leaves entity creation to the agent.
+    """
+    for f in entity.facts:
+        if not f.is_current:
+            continue
+        if f.text == target:
+            f.superseded_at = on_date
+            f.superseded_by = by
+            return f
+    return None

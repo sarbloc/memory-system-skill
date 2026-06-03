@@ -135,6 +135,9 @@ def entity_to_point(entity: Entity, vector: list[float]) -> PointStruct:
                 "expires": f.expires,
                 "last_seen": f.last_seen,
                 "hit_count": f.hit_count,
+                "valid_from": f.valid_from,
+                "superseded_at": f.superseded_at,
+                "superseded_by": f.superseded_by,
             }
             for f in entity.facts
         ],
@@ -158,6 +161,11 @@ def point_to_entity(point) -> Entity:
             expires=f.get("expires"),
             last_seen=f.get("last_seen"),
             hit_count=f.get("hit_count", 1),
+            # Bi-temporal fields (issue #21); .get() so pre-existing payloads
+            # without these keys load as None — no migration needed.
+            valid_from=f.get("valid_from"),
+            superseded_at=f.get("superseded_at"),
+            superseded_by=f.get("superseded_by"),
         )
         for f in p.get("facts", [])
     ]
@@ -195,7 +203,14 @@ def get_entity(
 def upsert_entity(
     client: QdrantClient, entity: Entity, vector: list[float], *, domain: str = "shared",
 ) -> None:
-    """Upsert an entity into the appropriate (domain, kind) collection."""
+    """Upsert an entity into the appropriate (domain, kind) collection.
+
+    Low-level primitive: it trusts the entity's facts to be already valid-time
+    consistent (no future ``valid_from`` or ``superseded_at``). That invariant is
+    enforced at the public write boundaries (``memory_store`` / CLI ``store`` /
+    ``import``), not here, so the default ``is_current`` view stays equal to
+    "valid now" (#24).
+    """
     kind = "decisions" if entity.type == "decision" else "entities"
     point = entity_to_point(entity, vector)
     client.upsert(collection_name=collection_name(domain, kind), points=[point])

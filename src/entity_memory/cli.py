@@ -19,7 +19,7 @@ from entity_memory.client import (
     upsert_entity,
 )
 from entity_memory.extract import MATCH_THRESHOLD
-from entity_memory.merge import build_search_text, compact, drop_expired, merge
+from entity_memory.merge import build_search_text, compact, drop_expired, mark_superseded, merge
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
 
@@ -64,7 +64,16 @@ def stats():
 @click.option("--type", "entity_type", required=True, help="Entity type: person|project|tool|preference|decision")
 @click.option("--id", "entity_id", required=True, help="Entity key (e.g. alice, dashboard)")
 @click.option("--content", required=True, help="Fact text to store")
-def store(entity_type: str, entity_id: str, content: str):
+@click.option(
+    "--supersedes", default=None,
+    help="Text of an existing current fact this replaces. "
+         "Marks it superseded (kept for --as-of queries, hidden from search).",
+)
+@click.option(
+    "--valid-from", "valid_from", default=None,
+    help="ISO date the new fact became true in the world, if not today.",
+)
+def store(entity_type: str, entity_id: str, content: str, supersedes: str | None, valid_from: str | None):
     """Directly upsert an entity with a fact."""
     client = get_client()
     ensure_collections(client)
@@ -74,18 +83,41 @@ def store(entity_type: str, entity_id: str, content: str):
     now = datetime.utcnow()
     today = now.date().isoformat()
 
+    # Future-effective dating isn't supported yet (issue #24) — see memory_store.
+    if valid_from is not None and valid_from[:10] > today:
+        raise click.ClickException(
+            f"future valid_from {valid_from!r} is not supported yet (today is "
+            f"{today}); future-effective dating is tracked in issue #24"
+        )
+
     existing = get_entity(client, full_id)
     if existing is None:
         existing = Entity(id=full_id, type=entity_type)
 
-    new_fact = Fact(text=content, added=today, source="cli:store")
+    superseded = None
+    if supersedes:
+        # Close the old fact exactly when the replacement starts (its valid_from,
+        # falling back to today): a backdated replacement must end the old fact at
+        # the same date, or an as-of query in the gap sees both as valid (#21).
+        marked = mark_superseded(
+            existing, supersedes, by=content, on_date=valid_from or today,
+        )
+        superseded = marked.text if marked is not None else None
+
+    new_fact = Fact(text=content, added=today, source="cli:store", valid_from=valid_from)
     merged = merge(existing, [new_fact], embedder, now=now)
 
     search_text = build_search_text(merged)
     vector = embedder.embed(search_text)
     upsert_entity(client, merged, vector)
 
-    click.echo(f"Stored: {full_id} ({len(merged.facts)} facts)")
+    current_facts = sum(1 for f in merged.facts if f.is_current)
+    click.echo(f"Stored: {full_id} ({current_facts} current facts)")
+    if supersedes:
+        if superseded is not None:
+            click.echo(f"  Superseded: {superseded!r}")
+        else:
+            click.echo(f"  No current fact matched --supersedes {supersedes!r}")
 
 
 @main.command()
@@ -103,7 +135,8 @@ def get(entity_id: str):
     click.echo(f"Facts ({len(entity.facts)}):")
     for f in entity.facts:
         expires = f" [expires {f.expires}]" if f.expires else ""
-        click.echo(f"  [{f.hit_count}x] {f.text} (since {f.added}, last seen {f.last_seen}){expires}")
+        superseded = f" [superseded {f.superseded_at}]" if f.superseded_at else ""
+        click.echo(f"  [{f.hit_count}x] {f.text} (since {f.added}, last seen {f.last_seen}){expires}{superseded}")
 
 
 @main.command()
@@ -140,13 +173,20 @@ def list_entities(entity_type: str | None):
 @click.argument("query")
 @click.option("--type", "entity_type", default=None, help="Filter by entity type")
 @click.option("--limit", default=5, help="Max results to return")
-def search(query: str, entity_type: str | None, limit: int):
+@click.option(
+    "--as-of", "as_of", default=None,
+    help="ISO date: show each entity as it was then (superseded facts in effect "
+         "at that date are shown). Default hides superseded facts.",
+)
+def search(query: str, entity_type: str | None, limit: int, as_of: str | None):
     """Semantic search across all entities."""
     from entity_memory.search import search_entities, format_results
 
     client = get_client()
     embedder = _get_embedder()
-    results = search_entities(client, query, embedder, entity_type=entity_type, limit=limit)
+    results = search_entities(
+        client, query, embedder, entity_type=entity_type, limit=limit, as_of=as_of,
+    )
     click.echo(format_results(results))
 
 
@@ -397,7 +437,7 @@ def export_cmd(fmt: str):
 def import_cmd(file: str):
     """Import entities from a JSON export. Runs merge logic (won't duplicate)."""
     import json as json_mod
-    from entity_memory.export import import_json
+    from entity_memory.export import import_json, reject_future_dated_facts
 
     client = get_client()
     ensure_collections(client)
@@ -408,6 +448,13 @@ def import_cmd(file: str):
         data = json_mod.load(f)
 
     imported = import_json(data)
+    # Validate the whole backup before writing anything, so a bad fact aborts the
+    # import atomically rather than half-applying it (issue #24).
+    try:
+        reject_future_dated_facts(imported, now.date().isoformat())
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
     for entity in imported:
         existing = get_entity(client, entity.id)
         if existing is None:

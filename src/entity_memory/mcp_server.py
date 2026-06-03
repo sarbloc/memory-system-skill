@@ -30,7 +30,7 @@ from entity_memory.client import (
     upsert_entity,
 )
 from entity_memory.extract import MATCH_THRESHOLD
-from entity_memory.merge import build_search_text, compact, merge
+from entity_memory.merge import build_search_text, compact, mark_superseded, merge
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
 from entity_memory.search import format_results, search_entities
@@ -65,6 +65,9 @@ def _entity_to_dict(entity: Entity) -> dict[str, Any]:
                 "expires": f.expires,
                 "last_seen": f.last_seen,
                 "hit_count": f.hit_count,
+                "valid_from": f.valid_from,
+                "superseded_at": f.superseded_at,
+                "superseded_by": f.superseded_by,
             }
             for f in entity.facts
         ],
@@ -82,6 +85,8 @@ def memory_store(
     entity_id: str,
     content: str,
     domain: str = "shared",
+    supersedes: str | None = None,
+    valid_from: str | None = None,
 ) -> dict[str, Any]:
     """Upsert an entity with a fact in the given domain.
 
@@ -90,6 +95,24 @@ def memory_store(
         entity_id: short id (e.g. 'alice') or full id ('person:alice')
         content: the fact text
         domain: shared | dev | personal (default shared)
+        supersedes: text of an existing CURRENT fact that this
+            new fact replaces. When set, that fact is marked superseded (today)
+            and dropped from default search/recall, but kept for as-of queries.
+            Use this when reality changed (e.g. "lives in Berlin" supersedes
+            "lives in London") rather than just adding a new independent fact.
+        valid_from: ISO date the new fact became true in the world, if it
+            differs from today (when it was recorded). Optional.
+
+    The superseded fact records ``superseded_by=content`` — the replacement text
+    as the caller asserted it. That's a descriptive audit trail of intent, not a
+    lookup key: if merge dedups ``content`` into an existing current fact with
+    longer wording, the surviving fact's text can differ from the recorded
+    ``superseded_by`` string. Nothing reads ``superseded_by`` back to resolve a
+    fact, so the divergence is cosmetic; tightening it to the post-merge wording
+    is deferred (issue #26).
+
+    Returns the entity id, its current fact count, and (when supersession fired)
+    the superseded fact's text.
     """
     _validate_domain(domain)
     client = get_client()
@@ -100,16 +123,43 @@ def memory_store(
     now = datetime.utcnow()
     today = now.date().isoformat()
 
+    # Future-effective dating (a valid_from past today) is a scheduling feature
+    # beyond this system's scope: the live view assumes is_current == valid-now,
+    # which only holds for backdated/same-day facts. Reject rather than half-apply
+    # it (tracked in issue #24).
+    if valid_from is not None and valid_from[:10] > today:
+        raise ValueError(
+            f"future valid_from {valid_from!r} is not supported yet (today is "
+            f"{today}); future-effective dating is tracked in issue #24"
+        )
+
     existing = get_entity(client, full_id, domain=domain)
     if existing is None:
         existing = Entity(id=full_id, type=entity_type)
 
-    new_fact = Fact(text=content, added=today, source="mcp:store")
+    superseded = None
+    if supersedes:
+        # Record supersession before merging the replacement, so the old fact is
+        # already historical and the new one merges as a current fact. The agent
+        # decides WHAT supersedes WHAT; the core just records it (issue #21).
+        # Close the old fact exactly when the replacement starts (its valid_from,
+        # falling back to today): a backdated replacement must end the old fact at
+        # the same date, or an as-of query in the gap sees both as valid.
+        marked = mark_superseded(
+            existing, supersedes, by=content, on_date=valid_from or today,
+        )
+        superseded = marked.text if marked is not None else None
+
+    new_fact = Fact(text=content, added=today, source="mcp:store", valid_from=valid_from)
     merged = merge(existing, [new_fact], embedder, now=now)
     vector = embedder.embed(build_search_text(merged))
     upsert_entity(client, merged, vector, domain=domain)
 
-    return {"id": full_id, "facts": len(merged.facts), "domain": domain}
+    current_facts = sum(1 for f in merged.facts if f.is_current)
+    result: dict[str, Any] = {"id": full_id, "facts": current_facts, "domain": domain}
+    if supersedes:
+        result["superseded"] = superseded
+    return result
 
 
 @mcp.tool()
@@ -142,16 +192,28 @@ def memory_search(
     domain: str = "shared",
     entity_type: str | None = None,
     limit: int = 5,
+    as_of: str | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search across entities and decisions in a domain.
 
     Returns hits sorted by score, each with the entity payload and score.
+
+    Superseded facts are hidden by default (issue #21). Pass ``as_of`` (an ISO
+    date, e.g. "2025-06-01") to see each entity as it was on that date — facts
+    valid then are returned, later/replaced ones are not. Use ``memory_get`` for
+    the full, unfiltered record including history.
+
+    Limitation: ranking uses the entity's current-state vector, so ``as_of``
+    projects history onto entities that current-state recall already surfaces —
+    it cannot retrieve one whose only matching term lives in a superseded fact
+    (no historical vector is kept). Historical-only findability is issue #25.
     """
     _validate_domain(domain)
     client = get_client()
     embedder = _embedder_instance()
     results = search_entities(
-        client, query, embedder, entity_type=entity_type, limit=limit, domain=domain,
+        client, query, embedder, entity_type=entity_type, limit=limit,
+        domain=domain, as_of=as_of,
     )
     return [
         {"score": r.score, **_entity_to_dict(r.entity)}

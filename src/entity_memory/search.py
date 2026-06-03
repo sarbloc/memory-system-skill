@@ -28,6 +28,25 @@ class SearchResult:
     score: float
 
 
+def _project_temporal(entity: Entity, as_of: str | None) -> Entity:
+    """Return ``entity`` with its facts projected to a temporal view (issue #21).
+
+    Default (``as_of is None``): drop superseded facts so recall reflects current
+    state. With ``as_of`` set: keep only facts in effect on that ISO date, so the
+    caller sees the entity as it was then. Mutates the (throwaway) entity built
+    by ``point_to_entity`` — safe because each search rebuilds entities freshly.
+
+    Note: ranking still comes from the stored "now" vector; only the *returned
+    facts* are time-shifted. Reconstructing historical ranking would need a
+    historical vector, which we deliberately don't keep.
+    """
+    if as_of is None:
+        entity.facts = [f for f in entity.facts if f.is_current]
+    else:
+        entity.facts = [f for f in entity.facts if f.valid_at(as_of)]
+    return entity
+
+
 def search_entities(
     client: QdrantClient,
     query: str,
@@ -36,11 +55,22 @@ def search_entities(
     limit: int = 5,
     *,
     domain: str = "shared",
+    as_of: str | None = None,
 ) -> list[SearchResult]:
     """Search across entities and decisions collections within a domain.
 
     Uses dense vector search as primary, with optional type filter.
     Deduplicates results across collections by entity_id, keeping the higher score.
+
+    Each result's facts are projected to a temporal view: superseded facts are
+    hidden by default; pass ``as_of`` (ISO date) to see each entity as it was on
+    that date (issue #21). Entities with no facts valid at that date are dropped,
+    and the limit is applied AFTER projection so they don't squat the top slots.
+    Use ``memory_get`` for the full, unfiltered record.
+
+    Retrieval ranks on the stored current-state vector (see ``_project_temporal``),
+    so ``as_of`` projects history onto entities current recall already surfaces;
+    it cannot find one whose only match is a superseded fact (issue #25).
     """
     query_vector = embedder.embed(query)
 
@@ -49,6 +79,16 @@ def search_entities(
         search_filter = Filter(
             must=[FieldCondition(key="type", match=MatchValue(value=entity_type))]
         )
+
+    # Temporal projection can empty an entity's fact list, so we project and drop
+    # empties BEFORE applying the caller's limit (issue #21). Historical (as_of)
+    # queries empty more often — a fact may not be valid at a past date — so we
+    # over-fetch more generously than the default "now" view. The fetch stays
+    # bounded: an earlier unbounded "whole collection" fetch turned every as_of
+    # search into an O(N) scan (Codex review of PR #23). as_of ranking is
+    # best-effort regardless (it ranks on the current-state vector — issue #25),
+    # so a capped candidate window is the right tradeoff over scanning everything.
+    fetch_limit = max(limit * (10 if as_of is not None else 2), limit)
 
     results_map: dict[str, SearchResult] = {}
 
@@ -61,7 +101,7 @@ def search_entities(
             collection_name=coll,
             query=query_vector,
             query_filter=search_filter,
-            limit=limit,
+            limit=fetch_limit,
             with_payload=True,
         )
 
@@ -71,14 +111,22 @@ def search_entities(
             if eid not in results_map or hit.score > results_map[eid].score:
                 results_map[eid] = SearchResult(entity=entity, score=hit.score)
 
-    text_results = _text_search(client, query, search_filter, limit, domain=domain)
+    text_results = _text_search(client, query, search_filter, fetch_limit, domain=domain)
     for sr in text_results:
         eid = sr.entity.id
         if eid not in results_map:
             results_map[eid] = sr
 
-    results = sorted(results_map.values(), key=lambda r: r.score, reverse=True)
-    return results[:limit]
+    ranked = sorted(results_map.values(), key=lambda r: r.score, reverse=True)
+
+    projected: list[SearchResult] = []
+    for r in ranked:
+        _project_temporal(r.entity, as_of)
+        if r.entity.facts:
+            projected.append(r)
+        if len(projected) >= limit:
+            break
+    return projected
 
 
 def _text_search(

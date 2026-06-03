@@ -216,3 +216,136 @@ class TestMemoryEventResolve:
     def test_invalid_domain_rejected(self, mcp_env, embedder):
         with pytest.raises(ValueError):
             mcp_server.memory_event_resolve(event_id="x", domain="bogus")
+
+
+# ── bi-temporal supersession via the MCP surface (issue #21) ──
+
+class TestMemoryStoreSupersession:
+    def test_supersedes_marks_old_fact(self, mcp_env):
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        out = mcp_server.memory_store(
+            "person", "alice", "lives in Berlin",
+            domain="shared", supersedes="lives in London",
+        )
+        assert out["superseded"] == "lives in London"
+        # Count reflects CURRENT facts only — the retired London fact is excluded.
+        assert out["facts"] == 1
+
+        # memory_get is the full record — both facts present, old one superseded.
+        ent = mcp_server.memory_get("person:alice", domain="shared")
+        by_text = {f["text"]: f for f in ent["facts"]}
+        assert by_text["lives in London"]["superseded_at"] is not None
+        assert by_text["lives in London"]["superseded_by"] == "lives in Berlin"
+        assert by_text["lives in Berlin"]["superseded_at"] is None
+
+    def test_supersedes_uses_valid_from_as_supersession_date(self, mcp_env):
+        # A backdated replacement must close the old fact at its valid_from, not
+        # today — otherwise an as-of query in the gap sees both as valid (Codex
+        # review, PR #23).
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        mcp_server.memory_store(
+            "person", "alice", "lives in Berlin", domain="shared",
+            supersedes="lives in London", valid_from="2026-01-01",
+        )
+        ent = mcp_server.memory_get("person:alice", domain="shared")
+        by_text = {f["text"]: f for f in ent["facts"]}
+        assert by_text["lives in London"]["superseded_at"] == "2026-01-01"
+        assert by_text["lives in Berlin"]["valid_from"] == "2026-01-01"
+
+    def test_supersedes_no_match_reports_none(self, mcp_env):
+        out = mcp_server.memory_store(
+            "person", "bob", "first fact", domain="shared", supersedes="nonexistent",
+        )
+        assert out["superseded"] is None
+
+    def test_search_hides_superseded_by_default(self, mcp_env):
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        mcp_server.memory_store(
+            "person", "alice", "lives in Berlin",
+            domain="shared", supersedes="lives in London",
+        )
+        hits = mcp_server.memory_search("where does alice live", domain="shared")
+        alice = next(h for h in hits if h["id"] == "person:alice")
+        texts = {f["text"] for f in alice["facts"]}
+        assert "lives in Berlin" in texts
+        assert "lives in London" not in texts
+
+    def test_search_as_of_returns_historical_state(self, mcp_env, embedder):
+        client = mcp_env
+        # Seed with explicit dates so the as-of window is deterministic.
+        old = Fact(
+            text="lives in London", added="2026-01-01", source="test",
+            last_seen="2026-01-01", superseded_at="2026-03-01",
+            superseded_by="lives in Berlin",
+        )
+        new = Fact(
+            text="lives in Berlin", added="2026-03-01", source="test",
+            last_seen="2026-03-01", valid_from="2026-03-01",
+        )
+        entity = Entity(id="person:alice", type="person", facts=[old, new], last_updated=NOW_ISO)
+        upsert_entity(client, entity, embedder.embed(build_search_text(entity)), domain="shared")
+
+        # As of Feb → only the London fact was in effect.
+        hist = mcp_server.memory_search("alice", domain="shared", as_of="2026-02-01")
+        alice = next(h for h in hist if h["id"] == "person:alice")
+        assert {f["text"] for f in alice["facts"]} == {"lives in London"}
+
+        # Default (now) → only the current Berlin fact.
+        cur = mcp_server.memory_search("alice", domain="shared")
+        alice_now = next(h for h in cur if h["id"] == "person:alice")
+        assert {f["text"] for f in alice_now["facts"]} == {"lives in Berlin"}
+
+    def test_future_valid_from_rejected(self, mcp_env):
+        # Future-effective dating is out of scope for now: the live view assumes
+        # is_current == valid-now, which only holds for backdated/same-day facts.
+        # memory_store must reject a future valid_from rather than half-apply it
+        # (issue #24). Far-future date so it is always ahead of the real "today".
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        with pytest.raises(ValueError):
+            mcp_server.memory_store(
+                "person", "alice", "lives in Berlin", domain="shared",
+                supersedes="lives in London", valid_from="2099-01-01",
+            )
+
+
+# ── as_of search: filter empties before applying the limit (issue #21) ──
+
+class TestSearchTemporalLimit:
+    def test_as_of_drops_empties_before_limit(self, mcp_env, embedder):
+        client = mcp_env
+        # Four CURRENT entities matching "status report" but only valid from a
+        # date AFTER the as_of (so they project to empty for that historical
+        # query), plus one valid then. They are current → they DO feed the vector
+        # and rank highly, so at limit=1 the projected-empty ones must not consume
+        # the slot (Codex review of PR #23). Old code sliced to limit BEFORE
+        # projecting and would return an empty-fact hit instead. Seeded via
+        # upsert_entity to bypass the future-valid_from store guard (issue #24);
+        # 2026-05-01 is past the real "today" but ahead of the as_of date.
+        for i in range(4):
+            e = Entity(
+                id=f"project:future{i}", type="project",
+                facts=[Fact(
+                    text=f"status report {i}", added="2026-05-01", source="t",
+                    last_seen="2026-05-01", valid_from="2026-05-01",
+                )],
+                last_updated="2026-05-01T00:00:00",
+            )
+            upsert_entity(
+                client, e,
+                embedder.embed(build_search_text(e, now=datetime(2026, 5, 1))),
+                domain="shared",
+            )
+        alive = Entity(
+            id="project:alive", type="project",
+            facts=[Fact(text="status report alive", added="2026-01-01", source="t",
+                        last_seen="2026-01-01")],
+            last_updated="2026-01-01T00:00:00",
+        )
+        upsert_entity(
+            client, alive, embedder.embed(build_search_text(alive)), domain="shared"
+        )
+
+        hits = mcp_server.memory_search(
+            "status report", domain="shared", as_of="2026-03-01", limit=1,
+        )
+        assert [h["id"] for h in hits] == ["project:alive"]
