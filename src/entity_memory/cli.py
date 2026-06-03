@@ -89,7 +89,12 @@ def store(entity_type: str, entity_id: str, content: str, supersedes: str | None
 
     superseded = None
     if supersedes:
-        marked = mark_superseded(existing, supersedes, by=content, on_date=today)
+        # Close the old fact exactly when the replacement starts (its valid_from,
+        # falling back to today): a backdated replacement must end the old fact at
+        # the same date, or an as-of query in the gap sees both as valid (#21).
+        marked = mark_superseded(
+            existing, supersedes, by=content, on_date=valid_from or today,
+        )
         superseded = marked.text if marked is not None else None
 
     new_fact = Fact(text=content, added=today, source="cli:store", valid_from=valid_from)

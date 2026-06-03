@@ -273,6 +273,14 @@ class TestFactTemporal:
         assert f.valid_at("2026-03-01") is False  # gone the day it is superseded
         assert f.valid_at("2026-04-01") is False
 
+    def test_valid_at_excludes_expired(self):
+        # A TTL'd fact is gone once its expiry date has passed — an as-of query
+        # after expiry must not resurrect it (Codex review, PR #23).
+        f = _fact("on vacation", added="2026-01-01", expires="2026-06-15")
+        assert f.valid_at("2026-06-01") is True
+        assert f.valid_at("2026-06-15") is False  # gone on the expiry date
+        assert f.valid_at("2026-07-01") is False
+
 
 # ── mark_superseded (issue #21) ──────────────────────────
 
@@ -354,3 +362,28 @@ class TestMergeDedupAgainstCurrentOnly:
         # History untouched: still superseded, hit_count not bumped.
         assert superseded[0].superseded_at == "2026-03-01"
         assert superseded[0].hit_count == 1
+
+    def test_dedup_takes_earlier_valid_from(self, embedder):
+        # Re-asserting a fact with an earlier valid_from widens the valid-time
+        # window backwards; dedup must keep the earlier start, not drop it
+        # (Codex review, PR #23).
+        entity = Entity(id="person:alice", type="person")
+        entity = merge(entity, [_fact("likes pizza")], embedder, now=NOW)
+        entity = merge(
+            entity, [_fact("likes pizza", valid_from="2026-01-01")], embedder, now=NOW
+        )
+        assert len(entity.facts) == 1
+        assert entity.facts[0].valid_from == "2026-01-01"
+        assert entity.facts[0].hit_count == 2
+
+    def test_dedup_keeps_existing_earlier_valid_from(self, embedder):
+        # The reverse: a later valid_from must NOT overwrite an earlier one.
+        entity = Entity(id="person:alice", type="person")
+        entity = merge(
+            entity, [_fact("likes pizza", valid_from="2026-01-01")], embedder, now=NOW
+        )
+        entity = merge(
+            entity, [_fact("likes pizza", valid_from="2026-05-01")], embedder, now=NOW
+        )
+        assert len(entity.facts) == 1
+        assert entity.facts[0].valid_from == "2026-01-01"

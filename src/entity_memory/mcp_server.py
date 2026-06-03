@@ -124,7 +124,12 @@ def memory_store(
         # Record supersession before merging the replacement, so the old fact is
         # already historical and the new one merges as a current fact. The agent
         # decides WHAT supersedes WHAT; the core just records it (issue #21).
-        marked = mark_superseded(existing, supersedes, by=content, on_date=today)
+        # Close the old fact exactly when the replacement starts (its valid_from,
+        # falling back to today): a backdated replacement must end the old fact at
+        # the same date, or an as-of query in the gap sees both as valid.
+        marked = mark_superseded(
+            existing, supersedes, by=content, on_date=valid_from or today,
+        )
         superseded = marked.text if marked is not None else None
 
     new_fact = Fact(text=content, added=today, source="mcp:store", valid_from=valid_from)

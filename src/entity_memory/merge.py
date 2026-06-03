@@ -111,6 +111,14 @@ def merge(
         if dupe is not None:
             dupe.hit_count += 1
             dupe.last_seen = today
+            # Keep the earliest known valid-time start. A re-assertion that
+            # carries an earlier valid_from means we learned the fact was true
+            # sooner than recorded; widening the window backwards must not be
+            # lost just because the texts deduped (issue #21).
+            if new_fact.valid_from is not None:
+                existing_start = dupe.valid_from or dupe.added
+                if new_fact.valid_from < existing_start:
+                    dupe.valid_from = new_fact.valid_from
             if len(new_fact.text) > len(dupe.text):
                 dupe.text = new_fact.text
                 dupe.embedding = new_fact.embedding

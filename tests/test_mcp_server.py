@@ -236,6 +236,20 @@ class TestMemoryStoreSupersession:
         assert by_text["lives in London"]["superseded_by"] == "lives in Berlin"
         assert by_text["lives in Berlin"]["superseded_at"] is None
 
+    def test_supersedes_uses_valid_from_as_supersession_date(self, mcp_env):
+        # A backdated replacement must close the old fact at its valid_from, not
+        # today — otherwise an as-of query in the gap sees both as valid (Codex
+        # review, PR #23).
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        mcp_server.memory_store(
+            "person", "alice", "lives in Berlin", domain="shared",
+            supersedes="lives in London", valid_from="2026-06-01",
+        )
+        ent = mcp_server.memory_get("person:alice", domain="shared")
+        by_text = {f["text"]: f for f in ent["facts"]}
+        assert by_text["lives in London"]["superseded_at"] == "2026-06-01"
+        assert by_text["lives in Berlin"]["valid_from"] == "2026-06-01"
+
     def test_supersedes_no_match_reports_none(self, mcp_env):
         out = mcp_server.memory_store(
             "person", "bob", "first fact", domain="shared", supersedes="nonexistent",

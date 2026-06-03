@@ -35,11 +35,17 @@ class Fact:
         gone on the day it is superseded, which is the day its replacement takes
         effect). ISO date strings compare correctly lexicographically, so no
         datetime parsing is needed.
+
+        A fact with a TTL (``expires``) is also gone once that date has passed:
+        an as-of query after expiry must not resurrect it. ``expires`` may be a
+        date or a datetime, so compare on the date prefix only.
         """
         start = self.valid_from or self.added
         if start > as_of:
             return False
         if self.superseded_at is not None and self.superseded_at <= as_of:
+            return False
+        if self.expires is not None and self.expires[:10] <= as_of:
             return False
         return True
 
