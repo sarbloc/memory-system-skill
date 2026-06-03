@@ -33,7 +33,7 @@ def _get_embedder():
 
 @click.group()
 def main():
-    """Entity memory system for OpenClaw agents."""
+    """Entity memory system for AI agents."""
     pass
 
 

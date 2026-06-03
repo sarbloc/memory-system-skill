@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "entity-memory"
 version = "0.1.0"
-description = "Entity-based persistent memory with semantic search for OpenClaw agents"
+description = "Entity-based persistent memory with semantic search for AI agents"
 requires-python = ">=3.11"
 dependencies = [
     "qdrant-client>=1.12",

@@ -63,17 +63,49 @@ ALL_COLLECTIONS = [collection_name(d, k) for d in DOMAINS for k in COLLECTION_KI
 COLLECTIONS = [collection_name("shared", k) for k in COLLECTION_KINDS]
 
 
+def _config_search_paths() -> list[Path]:
+    """Config file locations in precedence order (first existing wins).
+
+    Generic installs use the XDG path or skip the file entirely via env vars.
+    The legacy ``~/.openclaw/memory.json`` path is kept last so existing
+    OpenClaw/Endurance installs keep resolving unchanged.
+    """
+    paths: list[Path] = []
+    explicit = os.environ.get("ENTITY_MEMORY_CONFIG")
+    if explicit:
+        paths.append(Path(explicit))
+    paths.append(Path.home() / ".config" / "entity-memory" / "config.json")
+    paths.append(Path.home() / ".openclaw" / "memory.json")
+    return paths
+
+
 def load_config() -> dict:
-    """Load config from ~/.openclaw/memory.json, falling back to defaults."""
-    config_path = Path.home() / ".openclaw" / "memory.json"
-    defaults = {
+    """Resolve Qdrant config from env vars and standard file locations.
+
+    Precedence, highest first:
+
+    1. ``QDRANT_URL`` env var — point at any Qdrant with no config file at all.
+    2. ``ENTITY_MEMORY_CONFIG`` env var — explicit path to a config JSON.
+    3. ``~/.config/entity-memory/config.json`` — default config location.
+    4. ``~/.openclaw/memory.json`` — legacy OpenClaw path, kept for back-compat.
+    5. Built-in defaults (localhost Qdrant).
+
+    The first config file that exists wins; its top-level keys overlay the
+    defaults. ``QDRANT_URL`` then overrides the resolved url, so a deployment can
+    point at a different Qdrant without editing any file.
+    """
+    config: dict = {
         "qdrant": {"url": "http://127.0.0.1:6333", "api_key_env": "QDRANT_API_KEY"},
     }
-    if config_path.exists():
-        with open(config_path) as f:
-            user_config = json.load(f)
-        defaults.update(user_config)
-    return defaults
+    for path in _config_search_paths():
+        if path.exists():
+            with open(path) as f:
+                config.update(json.load(f))
+            break
+    url_override = os.environ.get("QDRANT_URL")
+    if url_override:
+        config.setdefault("qdrant", {})["url"] = url_override
+    return config
 
 
 def get_client(config: dict | None = None) -> QdrantClient:

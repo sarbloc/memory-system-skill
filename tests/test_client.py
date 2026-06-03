@@ -1,0 +1,72 @@
+"""Tests for config resolution in client.load_config (decoupling from OpenClaw)."""
+
+import json
+
+import pytest
+
+from entity_memory.client import load_config
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    """Point HOME at a temp dir and clear config-related env vars.
+
+    Stops the test from picking up a real ``~/.openclaw/memory.json`` or
+    ``~/.config/entity-memory/config.json`` on the host running the suite.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+    monkeypatch.delenv("ENTITY_MEMORY_CONFIG", raising=False)
+    return tmp_path
+
+
+def _write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
+class TestLoadConfig:
+    def test_defaults_when_nothing_set(self, isolated_home):
+        cfg = load_config()
+        assert cfg["qdrant"]["url"] == "http://127.0.0.1:6333"
+        assert cfg["qdrant"]["api_key_env"] == "QDRANT_API_KEY"
+
+    def test_qdrant_url_env_overrides_everything(self, isolated_home, monkeypatch):
+        # Even with a config file present, QDRANT_URL wins — a deployment can
+        # repoint Qdrant with zero file edits.
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://fromfile:6333"}})
+        monkeypatch.setenv("QDRANT_URL", "http://fromenv:9999")
+        assert load_config()["qdrant"]["url"] == "http://fromenv:9999"
+
+    def test_xdg_config_path(self, isolated_home):
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://xdg:6333", "api_key_env": "QDRANT_API_KEY"}})
+        assert load_config()["qdrant"]["url"] == "http://xdg:6333"
+
+    def test_explicit_config_env_path(self, isolated_home, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "custom.json"
+        cfg_file.write_text(json.dumps({"qdrant": {"url": "http://explicit:6333"}}))
+        monkeypatch.setenv("ENTITY_MEMORY_CONFIG", str(cfg_file))
+        assert load_config()["qdrant"]["url"] == "http://explicit:6333"
+
+    def test_legacy_openclaw_path_still_read(self, isolated_home):
+        # Back-compat: existing OpenClaw/Endurance installs keep resolving.
+        _write(isolated_home / ".openclaw" / "memory.json",
+               {"qdrant": {"url": "http://legacy:6333"}})
+        assert load_config()["qdrant"]["url"] == "http://legacy:6333"
+
+    def test_xdg_takes_precedence_over_legacy(self, isolated_home):
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://xdg:6333"}})
+        _write(isolated_home / ".openclaw" / "memory.json",
+               {"qdrant": {"url": "http://legacy:6333"}})
+        assert load_config()["qdrant"]["url"] == "http://xdg:6333"
+
+    def test_explicit_env_path_precedes_xdg(self, isolated_home, tmp_path, monkeypatch):
+        cfg_file = tmp_path / "custom.json"
+        cfg_file.write_text(json.dumps({"qdrant": {"url": "http://explicit:6333"}}))
+        monkeypatch.setenv("ENTITY_MEMORY_CONFIG", str(cfg_file))
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://xdg:6333"}})
+        assert load_config()["qdrant"]["url"] == "http://explicit:6333"

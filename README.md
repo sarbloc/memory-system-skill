@@ -1,6 +1,6 @@
 # Entity Memory
 
-Persistent entity-based memory system for OpenClaw agents. Stores knowledge as discrete entities that are upserted in place — growth is proportional to unique concepts, not time.
+Persistent entity-based memory system for AI agents. Stores knowledge as discrete entities that are upserted in place — growth is proportional to unique concepts, not time.
 
 ## Quick start
 
@@ -37,7 +37,14 @@ All operations are deterministic (no LLM calls). Deduplication, merging, and com
 
 ## Configuration
 
-Config file: `~/.openclaw/memory.json`
+By default the CLI talks to a local Qdrant at `http://127.0.0.1:6333`. Override
+without any file via environment variables:
+
+- `QDRANT_URL` — Qdrant endpoint (highest precedence; no config file needed)
+- `QDRANT_API_KEY` — API key, if your Qdrant requires one
+- `ENTITY_MEMORY_CONFIG` — path to a config JSON (overrides the default location)
+
+Or drop a config file at `~/.config/entity-memory/config.json`:
 
 ```json
 {
@@ -47,6 +54,9 @@ Config file: `~/.openclaw/memory.json`
   }
 }
 ```
+
+The legacy path `~/.openclaw/memory.json` is still read for backward
+compatibility, after the XDG location.
 
 ## OpenClaw skill
 

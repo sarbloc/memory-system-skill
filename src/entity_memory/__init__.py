@@ -1,1 +1,1 @@
-"""Entity-based persistent memory for OpenClaw agents."""
+"""Entity-based persistent memory for AI agents."""
