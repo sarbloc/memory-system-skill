@@ -47,14 +47,6 @@ def _project_temporal(entity: Entity, as_of: str | None) -> Entity:
     return entity
 
 
-def _collection_size(client: QdrantClient, coll: str) -> int:
-    """Exact point count for a collection, or 0 if it doesn't exist/errors."""
-    try:
-        return client.count(collection_name=coll, exact=True).count
-    except Exception:
-        return 0
-
-
 def search_entities(
     client: QdrantClient,
     query: str,
@@ -88,21 +80,15 @@ def search_entities(
             must=[FieldCondition(key="type", match=MatchValue(value=entity_type))]
         )
 
-    # Temporal projection can empty an entity's fact list, so we must project and
-    # drop the empties BEFORE applying the caller's limit (issue #21). For a
-    # historical ``as_of`` query the valid set may be a small slice of a large
-    # history, so we rank the whole (small) collection to avoid under-returning
-    # when many top-ranked hits are empty then; the default "now" view rarely
-    # empties, so a modest over-fetch suffices (Codex review of PR #23).
-    if as_of is not None:
-        fetch_limit = max(
-            (_collection_size(client, collection_name(domain, k))
-             for k in ("entities", "decisions")),
-            default=limit,
-        )
-        fetch_limit = max(fetch_limit, limit)
-    else:
-        fetch_limit = max(limit * 2, limit)
+    # Temporal projection can empty an entity's fact list, so we project and drop
+    # empties BEFORE applying the caller's limit (issue #21). Historical (as_of)
+    # queries empty more often — a fact may not be valid at a past date — so we
+    # over-fetch more generously than the default "now" view. The fetch stays
+    # bounded: an earlier unbounded "whole collection" fetch turned every as_of
+    # search into an O(N) scan (Codex review of PR #23). as_of ranking is
+    # best-effort regardless (it ranks on the current-state vector — issue #25),
+    # so a capped candidate window is the right tradeoff over scanning everything.
+    fetch_limit = max(limit * (10 if as_of is not None else 2), limit)
 
     results_map: dict[str, SearchResult] = {}
 
