@@ -59,6 +59,13 @@ class TestLoadConfig:
         with pytest.raises(FileNotFoundError):
             load_config()
 
+    def test_qdrant_url_rescues_missing_explicit_config(self, isolated_home, monkeypatch):
+        # QDRANT_URL is highest precedence: a missing ENTITY_MEMORY_CONFIG must
+        # NOT abort when the env URL already supplies what we need.
+        monkeypatch.setenv("ENTITY_MEMORY_CONFIG", str(isolated_home / "nope.json"))
+        monkeypatch.setenv("QDRANT_URL", "http://fromenv:9999")
+        assert load_config()["qdrant"]["url"] == "http://fromenv:9999"
+
     def test_legacy_openclaw_path_still_read(self, isolated_home):
         # Back-compat: existing OpenClaw/Endurance installs keep resolving.
         _write(isolated_home / ".openclaw" / "memory.json",

@@ -83,8 +83,9 @@ def load_config() -> dict:
 
     1. ``QDRANT_URL`` env var — point at any Qdrant with no config file at all.
     2. ``ENTITY_MEMORY_CONFIG`` env var — explicit path to a config JSON. When
-       set it is the *only* file consulted: if it doesn't exist we raise rather
-       than silently falling back to a different Qdrant the operator didn't pick.
+       set it is the *only* file consulted; if it's missing we raise rather than
+       silently using a different Qdrant — unless ``QDRANT_URL`` is also set,
+       which is higher precedence and supplies the url without needing a file.
     3. ``~/.config/entity-memory/config.json`` — default config location.
     4. ``~/.openclaw/memory.json`` — legacy OpenClaw path, kept for back-compat.
     5. Built-in defaults (localhost Qdrant).
@@ -96,23 +97,28 @@ def load_config() -> dict:
     config: dict = {
         "qdrant": {"url": "http://127.0.0.1:6333", "api_key_env": "QDRANT_API_KEY"},
     }
+    url_override = os.environ.get("QDRANT_URL")
     explicit = os.environ.get("ENTITY_MEMORY_CONFIG")
     if explicit:
         explicit_path = Path(explicit)
-        if not explicit_path.exists():
+        if explicit_path.exists():
+            with open(explicit_path) as f:
+                config.update(json.load(f))
+        elif not url_override:
+            # Operator pointed at a config we can't read and gave no QDRANT_URL
+            # to fall back on — abort rather than silently using another Qdrant.
             raise FileNotFoundError(
                 f"ENTITY_MEMORY_CONFIG points at {explicit!r}, which does not "
-                "exist; refusing to silently fall back to a different Qdrant config."
+                "exist; set QDRANT_URL or fix the path."
             )
-        with open(explicit_path) as f:
-            config.update(json.load(f))
+        # else: QDRANT_URL (higher precedence) supplies the url below, so a
+        # missing explicit file is non-fatal.
     else:
         for path in _config_search_paths():
             if path.exists():
                 with open(path) as f:
                     config.update(json.load(f))
                 break
-    url_override = os.environ.get("QDRANT_URL")
     if url_override:
         config.setdefault("qdrant", {})["url"] = url_override
     return config
