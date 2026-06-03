@@ -437,7 +437,7 @@ def export_cmd(fmt: str):
 def import_cmd(file: str):
     """Import entities from a JSON export. Runs merge logic (won't duplicate)."""
     import json as json_mod
-    from entity_memory.export import import_json, reject_future_valid_from
+    from entity_memory.export import import_json, reject_future_dated_facts
 
     client = get_client()
     ensure_collections(client)
@@ -451,7 +451,7 @@ def import_cmd(file: str):
     # Validate the whole backup before writing anything, so a bad fact aborts the
     # import atomically rather than half-applying it (issue #24).
     try:
-        reject_future_valid_from(imported, now.date().isoformat())
+        reject_future_dated_facts(imported, now.date().isoformat())
     except ValueError as exc:
         raise click.ClickException(str(exc))
 

@@ -103,6 +103,14 @@ def memory_store(
         valid_from: ISO date the new fact became true in the world, if it
             differs from today (when it was recorded). Optional.
 
+    The superseded fact records ``superseded_by=content`` — the replacement text
+    as the caller asserted it. That's a descriptive audit trail of intent, not a
+    lookup key: if merge dedups ``content`` into an existing current fact with
+    longer wording, the surviving fact's text can differ from the recorded
+    ``superseded_by`` string. Nothing reads ``superseded_by`` back to resolve a
+    fact, so the divergence is cosmetic; tightening it to the post-merge wording
+    is deferred (issue #26).
+
     Returns the entity id, its current fact count, and (when supersession fired)
     the superseded fact's text.
     """
