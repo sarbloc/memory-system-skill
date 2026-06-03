@@ -95,7 +95,7 @@ def memory_store(
         entity_id: short id (e.g. 'alice') or full id ('person:alice')
         content: the fact text
         domain: shared | dev | personal (default shared)
-        supersedes: text (or source id) of an existing CURRENT fact that this
+        supersedes: text of an existing CURRENT fact that this
             new fact replaces. When set, that fact is marked superseded (today)
             and dropped from default search/recall, but kept for as-of queries.
             Use this when reality changed (e.g. "lives in Berlin" supersedes
@@ -147,7 +147,8 @@ def memory_store(
     vector = embedder.embed(build_search_text(merged))
     upsert_entity(client, merged, vector, domain=domain)
 
-    result: dict[str, Any] = {"id": full_id, "facts": len(merged.facts), "domain": domain}
+    current_facts = sum(1 for f in merged.facts if f.is_current)
+    result: dict[str, Any] = {"id": full_id, "facts": current_facts, "domain": domain}
     if supersedes:
         result["superseded"] = superseded
     return result

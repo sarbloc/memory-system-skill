@@ -66,7 +66,7 @@ def stats():
 @click.option("--content", required=True, help="Fact text to store")
 @click.option(
     "--supersedes", default=None,
-    help="Text (or source id) of an existing current fact this replaces. "
+    help="Text of an existing current fact this replaces. "
          "Marks it superseded (kept for --as-of queries, hidden from search).",
 )
 @click.option(
@@ -111,7 +111,8 @@ def store(entity_type: str, entity_id: str, content: str, supersedes: str | None
     vector = embedder.embed(search_text)
     upsert_entity(client, merged, vector)
 
-    click.echo(f"Stored: {full_id} ({len(merged.facts)} facts)")
+    current_facts = sum(1 for f in merged.facts if f.is_current)
+    click.echo(f"Stored: {full_id} ({current_facts} current facts)")
     if supersedes:
         if superseded is not None:
             click.echo(f"  Superseded: {superseded!r}")

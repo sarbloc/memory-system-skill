@@ -228,6 +228,8 @@ class TestMemoryStoreSupersession:
             domain="shared", supersedes="lives in London",
         )
         assert out["superseded"] == "lives in London"
+        # Count reflects CURRENT facts only — the retired London fact is excluded.
+        assert out["facts"] == 1
 
         # memory_get is the full record — both facts present, old one superseded.
         ent = mcp_server.memory_get("person:alice", domain="shared")

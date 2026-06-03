@@ -294,13 +294,6 @@ class TestMarkSuperseded:
         assert marked.superseded_by == "lives in Berlin"
         assert marked.is_current is False
 
-    def test_marks_by_source(self):
-        entity = Entity(id="person:alice", type="person")
-        entity.facts = [_fact("lives in London", source="event:42")]
-        marked = mark_superseded(entity, "event:42", by="lives in Berlin", on_date="2026-03-10")
-        assert marked is entity.facts[0]
-        assert marked.superseded_at == "2026-03-10"
-
     def test_no_match_returns_none(self):
         entity = Entity(id="person:alice", type="person")
         entity.facts = [_fact("lives in London")]

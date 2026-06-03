@@ -174,8 +174,8 @@ def mark_superseded(
 ) -> Optional[Fact]:
     """Mark the current fact identified by ``target`` as superseded.
 
-    ``target`` matches a current fact by exact text or by source id. The first
-    matching current fact gets ``superseded_at = on_date`` and
+    ``target`` matches a current fact by exact text. The first matching current
+    fact gets ``superseded_at = on_date`` and
     ``superseded_by = by`` (the replacing fact's text). Already-superseded facts
     are skipped. Returns the fact that was superseded, or None if nothing
     matched.
@@ -188,7 +188,7 @@ def mark_superseded(
     for f in entity.facts:
         if not f.is_current:
             continue
-        if f.text == target or f.source == target:
+        if f.text == target:
             f.superseded_at = on_date
             f.superseded_by = by
             return f
