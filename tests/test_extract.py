@@ -3,11 +3,25 @@
 from datetime import datetime
 
 from entity_memory.extract import (
+    build_entity_index,
     extract_events,
+    extract_events_with_index,
     match_sentence_to_entity,
     split_sentences,
 )
 from entity_memory.models import Entity, Fact
+
+
+class _CountingEmbedder:
+    """Wraps an embedder and counts embed() calls (issue #12 regression guard)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.calls = 0
+
+    def embed(self, text):
+        self.calls += 1
+        return self.inner.embed(text)
 
 
 NOW = datetime(2026, 3, 10)
@@ -145,3 +159,47 @@ class TestExtractEvents:
         result = extract_events(events, [entity], embedder, now=NOW)
         assert "match" in result.matched_event_ids
         assert "nomatch" not in result.matched_event_ids
+
+
+# ── embedding cost (issue #12 regression guard) ──────────
+
+class TestEmbedsCorpusOnce:
+    def test_embed_calls_additive_not_multiplicative(self, embedder):
+        """Each entity is embedded once per run, not once per sentence.
+
+        This is the canary for the #12 blowup: the old per-sentence
+        re-embedding of the whole corpus made embed calls scale as
+        events × sentences × entities. With the precomputed index it must be
+        len(entities) + total_sentences.
+        """
+        entities = [
+            _entity("person:alice", "person", ["Manages the auth team"]),
+            _entity("project:dash", "project", ["The trading dashboard"]),
+            _entity("tool:qdrant", "tool", ["A vector database"]),
+        ]
+        events = [
+            {"id": "e1", "text": "First sentence here. Second sentence here."},
+            {"id": "e2", "text": "Third sentence here. Fourth sentence here."},
+        ]
+        total_sentences = 4
+        counter = _CountingEmbedder(embedder)
+
+        extract_events(events, entities, counter, now=NOW)
+
+        # 3 entity embeds + 4 sentence embeds. The old path would be 4*3 + 4.
+        assert counter.calls == len(entities) + total_sentences
+
+    def test_with_index_does_not_re_embed_entities(self, embedder):
+        """extract_events_with_index embeds only sentences, never entities."""
+        entities = [
+            _entity("person:alice", "person", ["Manages the auth team"]),
+            _entity("project:dash", "project", ["The trading dashboard"]),
+        ]
+        index = build_entity_index(entities, embedder)  # entity embeds happen here
+
+        events = [{"id": "e1", "text": "One sentence. Two sentence. Three sentence."}]
+        counter = _CountingEmbedder(embedder)
+        extract_events_with_index(events, index, counter, now=NOW)
+
+        # Index is prebuilt → only the 3 sentences are embedded.
+        assert counter.calls == 3
