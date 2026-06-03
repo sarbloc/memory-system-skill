@@ -10,6 +10,7 @@ from entity_memory.merge import (
     compact,
     drop_expired,
     find_duplicate,
+    mark_superseded,
     merge,
     fact_score,
     DUPE_THRESHOLD,
@@ -21,10 +22,14 @@ NOW = datetime(2026, 3, 10)
 TODAY = NOW.date().isoformat()
 
 
-def _fact(text, added=TODAY, source="event:001", expires=None, hit_count=1, last_seen=None):
+def _fact(
+    text, added=TODAY, source="event:001", expires=None, hit_count=1, last_seen=None,
+    valid_from=None, superseded_at=None, superseded_by=None,
+):
     return Fact(
         text=text, added=added, source=source,
         expires=expires, hit_count=hit_count, last_seen=last_seen or added,
+        valid_from=valid_from, superseded_at=superseded_at, superseded_by=superseded_by,
     )
 
 
@@ -225,3 +230,127 @@ class TestBuildSearchText:
         high_pos = text.index("high priority")
         low_pos = text.index("low priority")
         assert high_pos < low_pos
+
+    def test_excludes_superseded_facts(self):
+        # Superseded facts must not feed the search vector (issue #21).
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [
+            _fact("lives in Berlin"),
+            _fact("lives in London", superseded_at="2026-03-01", superseded_by="lives in Berlin"),
+        ]
+        text = build_search_text(entity, now=NOW)
+        assert "lives in Berlin" in text
+        assert "London" not in text
+
+
+# ── bi-temporal Fact predicates (issue #21) ──────────────
+
+class TestFactTemporal:
+    def test_is_current_default(self):
+        assert _fact("x").is_current is True
+
+    def test_is_current_when_superseded(self):
+        assert _fact("x", superseded_at="2026-03-01").is_current is False
+
+    def test_valid_at_before_added_is_false(self):
+        f = _fact("x", added="2026-01-01")
+        assert f.valid_at("2025-12-31") is False
+
+    def test_valid_at_on_and_after_start_is_true(self):
+        f = _fact("x", added="2026-01-01")
+        assert f.valid_at("2026-01-01") is True
+        assert f.valid_at("2026-06-01") is True
+
+    def test_valid_at_uses_valid_from_over_added(self):
+        # Recorded 2026-01-01 but only true from 2026-02-01.
+        f = _fact("x", added="2026-01-01", valid_from="2026-02-01")
+        assert f.valid_at("2026-01-15") is False
+        assert f.valid_at("2026-02-15") is True
+
+    def test_valid_at_supersession_is_exclusive(self):
+        f = _fact("x", added="2026-01-01", superseded_at="2026-03-01")
+        assert f.valid_at("2026-02-28") is True
+        assert f.valid_at("2026-03-01") is False  # gone the day it is superseded
+        assert f.valid_at("2026-04-01") is False
+
+
+# ── mark_superseded (issue #21) ──────────────────────────
+
+class TestMarkSuperseded:
+    def test_marks_by_text(self):
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [_fact("lives in London")]
+        marked = mark_superseded(entity, "lives in London", by="lives in Berlin", on_date="2026-03-10")
+        assert marked is entity.facts[0]
+        assert marked.superseded_at == "2026-03-10"
+        assert marked.superseded_by == "lives in Berlin"
+        assert marked.is_current is False
+
+    def test_marks_by_source(self):
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [_fact("lives in London", source="event:42")]
+        marked = mark_superseded(entity, "event:42", by="lives in Berlin", on_date="2026-03-10")
+        assert marked is entity.facts[0]
+        assert marked.superseded_at == "2026-03-10"
+
+    def test_no_match_returns_none(self):
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [_fact("lives in London")]
+        assert mark_superseded(entity, "no such fact", by="x", on_date="2026-03-10") is None
+
+    def test_skips_already_superseded(self):
+        # Only an already-superseded fact matches → nothing to mark.
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [_fact("lives in London", superseded_at="2026-01-01")]
+        assert mark_superseded(entity, "lives in London", by="x", on_date="2026-03-10") is None
+
+    def test_marks_current_when_both_present(self):
+        # A superseded + a current fact share text → mark the current one.
+        entity = Entity(id="person:alice", type="person")
+        old = _fact("recurring", superseded_at="2026-01-01")
+        cur = _fact("recurring")
+        entity.facts = [old, cur]
+        marked = mark_superseded(entity, "recurring", by="x", on_date="2026-03-10")
+        assert marked is cur
+        assert old.superseded_at == "2026-01-01"  # untouched
+
+
+# ── supersession in compact / merge (issue #21) ──────────
+
+class TestSupersededInCompact:
+    def test_superseded_dropped_before_current(self):
+        entity = Entity(id="test:e", type="test")
+        current = [_fact(f"current {i}") for i in range(MAX_FACTS)]
+        superseded = _fact("old", superseded_at="2026-01-01")
+        entity.facts = current + [superseded]
+        result = compact(entity, now=NOW)
+        assert len(result.facts) == MAX_FACTS
+        assert all(f.is_current for f in result.facts)
+        assert "old" not in [f.text for f in result.facts]
+
+    def test_current_outranks_high_score_superseded(self):
+        # A superseded fact with a huge hit_count still drops before plain
+        # current facts — currency beats score.
+        entity = Entity(id="test:e", type="test")
+        current = [_fact(f"current {i}", hit_count=1) for i in range(MAX_FACTS)]
+        superseded = _fact("old but popular", hit_count=100, superseded_at="2026-01-01")
+        entity.facts = current + [superseded]
+        result = compact(entity, now=NOW)
+        assert "old but popular" not in [f.text for f in result.facts]
+
+
+class TestMergeDedupAgainstCurrentOnly:
+    def test_reasserted_fact_appends_not_revives(self, embedder):
+        # A superseded fact must not be revived by a re-asserted duplicate; the
+        # new assertion appends as a fresh current fact, history left intact.
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [_fact("lives in London", superseded_at="2026-03-01")]
+        entity = merge(entity, [_fact("lives in London")], embedder, now=NOW)
+        assert len(entity.facts) == 2
+        superseded = [f for f in entity.facts if not f.is_current]
+        current = [f for f in entity.facts if f.is_current]
+        assert len(superseded) == 1
+        assert len(current) == 1
+        # History untouched: still superseded, hit_count not bumped.
+        assert superseded[0].superseded_at == "2026-03-01"
+        assert superseded[0].hit_count == 1

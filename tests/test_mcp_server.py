@@ -216,3 +216,65 @@ class TestMemoryEventResolve:
     def test_invalid_domain_rejected(self, mcp_env, embedder):
         with pytest.raises(ValueError):
             mcp_server.memory_event_resolve(event_id="x", domain="bogus")
+
+
+# ── bi-temporal supersession via the MCP surface (issue #21) ──
+
+class TestMemoryStoreSupersession:
+    def test_supersedes_marks_old_fact(self, mcp_env):
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        out = mcp_server.memory_store(
+            "person", "alice", "lives in Berlin",
+            domain="shared", supersedes="lives in London",
+        )
+        assert out["superseded"] == "lives in London"
+
+        # memory_get is the full record — both facts present, old one superseded.
+        ent = mcp_server.memory_get("person:alice", domain="shared")
+        by_text = {f["text"]: f for f in ent["facts"]}
+        assert by_text["lives in London"]["superseded_at"] is not None
+        assert by_text["lives in London"]["superseded_by"] == "lives in Berlin"
+        assert by_text["lives in Berlin"]["superseded_at"] is None
+
+    def test_supersedes_no_match_reports_none(self, mcp_env):
+        out = mcp_server.memory_store(
+            "person", "bob", "first fact", domain="shared", supersedes="nonexistent",
+        )
+        assert out["superseded"] is None
+
+    def test_search_hides_superseded_by_default(self, mcp_env):
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        mcp_server.memory_store(
+            "person", "alice", "lives in Berlin",
+            domain="shared", supersedes="lives in London",
+        )
+        hits = mcp_server.memory_search("where does alice live", domain="shared")
+        alice = next(h for h in hits if h["id"] == "person:alice")
+        texts = {f["text"] for f in alice["facts"]}
+        assert "lives in Berlin" in texts
+        assert "lives in London" not in texts
+
+    def test_search_as_of_returns_historical_state(self, mcp_env, embedder):
+        client = mcp_env
+        # Seed with explicit dates so the as-of window is deterministic.
+        old = Fact(
+            text="lives in London", added="2026-01-01", source="test",
+            last_seen="2026-01-01", superseded_at="2026-03-01",
+            superseded_by="lives in Berlin",
+        )
+        new = Fact(
+            text="lives in Berlin", added="2026-03-01", source="test",
+            last_seen="2026-03-01", valid_from="2026-03-01",
+        )
+        entity = Entity(id="person:alice", type="person", facts=[old, new], last_updated=NOW_ISO)
+        upsert_entity(client, entity, embedder.embed(build_search_text(entity)), domain="shared")
+
+        # As of Feb → only the London fact was in effect.
+        hist = mcp_server.memory_search("alice", domain="shared", as_of="2026-02-01")
+        alice = next(h for h in hist if h["id"] == "person:alice")
+        assert {f["text"] for f in alice["facts"]} == {"lives in London"}
+
+        # Default (now) → only the current Berlin fact.
+        cur = mcp_server.memory_search("alice", domain="shared")
+        alice_now = next(h for h in cur if h["id"] == "person:alice")
+        assert {f["text"] for f in alice_now["facts"]} == {"lives in Berlin"}

@@ -28,6 +28,25 @@ class SearchResult:
     score: float
 
 
+def _project_temporal(entity: Entity, as_of: str | None) -> Entity:
+    """Return ``entity`` with its facts projected to a temporal view (issue #21).
+
+    Default (``as_of is None``): drop superseded facts so recall reflects current
+    state. With ``as_of`` set: keep only facts in effect on that ISO date, so the
+    caller sees the entity as it was then. Mutates the (throwaway) entity built
+    by ``point_to_entity`` — safe because each search rebuilds entities freshly.
+
+    Note: ranking still comes from the stored "now" vector; only the *returned
+    facts* are time-shifted. Reconstructing historical ranking would need a
+    historical vector, which we deliberately don't keep.
+    """
+    if as_of is None:
+        entity.facts = [f for f in entity.facts if f.is_current]
+    else:
+        entity.facts = [f for f in entity.facts if f.valid_at(as_of)]
+    return entity
+
+
 def search_entities(
     client: QdrantClient,
     query: str,
@@ -36,11 +55,16 @@ def search_entities(
     limit: int = 5,
     *,
     domain: str = "shared",
+    as_of: str | None = None,
 ) -> list[SearchResult]:
     """Search across entities and decisions collections within a domain.
 
     Uses dense vector search as primary, with optional type filter.
     Deduplicates results across collections by entity_id, keeping the higher score.
+
+    Each result's facts are projected to a temporal view: superseded facts are
+    hidden by default; pass ``as_of`` (ISO date) to see each entity as it was on
+    that date (issue #21). Use ``memory_get`` for the full, unfiltered record.
     """
     query_vector = embedder.embed(query)
 
@@ -78,7 +102,10 @@ def search_entities(
             results_map[eid] = sr
 
     results = sorted(results_map.values(), key=lambda r: r.score, reverse=True)
-    return results[:limit]
+    top = results[:limit]
+    for r in top:
+        _project_temporal(r.entity, as_of)
+    return top
 
 
 def _text_search(
