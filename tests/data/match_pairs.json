@@ -1,0 +1,108 @@
+{
+  "description": "Hand-labelled sentence<->entity pairs for tuning the extract MATCH_THRESHOLD (issue #17). Each pair is an incoming observation sentence and an existing entity; should_match is whether the sentence should ENRICH that entity (attach as a new fact) under per-fact matching. Includes deliberate semantic traps (Endurance the server vs the film, taxman the project vs literal taxes, Dr Brand vs brand strategy) where context, not surface words, must decide. Embed with the real all-MiniLM-L6-v2 model; the mock embedder is non-semantic and useless here.",
+  "pairs": [
+    {
+      "entity": {"type": "project", "id": "project:endurance", "facts": ["The home server that runs the TARS agent", "Hosts the entity-memory MCP server", "Runs nightly memory extraction on a cron"]},
+      "sentence": "Endurance kicked off its nightly extraction run at 3am.",
+      "should_match": true,
+      "note": "directly about the nightly extraction cron fact"
+    },
+    {
+      "entity": {"type": "project", "id": "project:endurance", "facts": ["The home server that runs the TARS agent", "Hosts the entity-memory MCP server", "Runs nightly memory extraction on a cron"]},
+      "sentence": "The TARS agent on the home server picked up a new task this morning.",
+      "should_match": true,
+      "note": "about the home-server-runs-TARS fact"
+    },
+    {
+      "entity": {"type": "project", "id": "project:endurance", "facts": ["The home server that runs the TARS agent", "Hosts the entity-memory MCP server", "Runs nightly memory extraction on a cron"]},
+      "sentence": "I rewatched Interstellar last night and the Endurance docking scene still holds up.",
+      "should_match": false,
+      "note": "trap: Endurance the film ship, not the server"
+    },
+    {
+      "entity": {"type": "project", "id": "project:taxman", "facts": ["Trading platform side project", "Has an iOS app and a web dashboard", "Targeting a Q3 2026 release"]},
+      "sentence": "Shipped a new positions screen in the taxman iOS app.",
+      "should_match": true,
+      "note": "about the iOS app fact"
+    },
+    {
+      "entity": {"type": "project", "id": "project:taxman", "facts": ["Trading platform side project", "Has an iOS app and a web dashboard", "Targeting a Q3 2026 release"]},
+      "sentence": "The trading platform's dashboard got a performance pass today.",
+      "should_match": true,
+      "note": "about the dashboard / trading-platform fact"
+    },
+    {
+      "entity": {"type": "project", "id": "project:taxman", "facts": ["Trading platform side project", "Has an iOS app and a web dashboard", "Targeting a Q3 2026 release"]},
+      "sentence": "Filed my actual tax return with the accountant before the deadline.",
+      "should_match": false,
+      "note": "trap: literal taxes, not the taxman project"
+    },
+    {
+      "entity": {"type": "person", "id": "person:sarbloc", "facts": ["Frontend-leaning developer", "Reviews agent output critically", "Prefers terse direct responses"]},
+      "sentence": "Sarbloc pushed back hard on the review and wants the replies tighter.",
+      "should_match": true,
+      "note": "about reviews-critically / prefers-terse facts"
+    },
+    {
+      "entity": {"type": "person", "id": "person:sarbloc", "facts": ["Frontend-leaning developer", "Reviews agent output critically", "Prefers terse direct responses"]},
+      "sentence": "The backend on-call rotation was reshuffled for next quarter.",
+      "should_match": false,
+      "note": "unrelated to this person"
+    },
+    {
+      "entity": {"type": "tool", "id": "tool:qdrant", "facts": ["Vector database used for memory storage", "Runs in a Docker container on localhost", "Stores entities, events and decisions"]},
+      "sentence": "Bumped the Qdrant container to the latest image and restarted it.",
+      "should_match": true,
+      "hard": true,
+      "note": "should enrich, but MiniLM scores it ~0.15 (versioning/restart reads as a different aspect than 'runs in a Docker container') — below the top negative, so unseparable by a global gate. Flagged hard so the guard test does not enforce it."
+    },
+    {
+      "entity": {"type": "tool", "id": "tool:qdrant", "facts": ["Vector database used for memory storage", "Runs in a Docker container on localhost", "Stores entities, events and decisions"]},
+      "sentence": "Wrote the new entities straight into the vector database.",
+      "should_match": true,
+      "note": "about the vector-DB / stores-entities facts"
+    },
+    {
+      "entity": {"type": "tool", "id": "tool:qdrant", "facts": ["Vector database used for memory storage", "Runs in a Docker container on localhost", "Stores entities, events and decisions"]},
+      "sentence": "The Postgres connection pool was exhausted under load.",
+      "should_match": false,
+      "note": "different database; should not enrich qdrant"
+    },
+    {
+      "entity": {"type": "tool", "id": "tool:qdrant", "facts": ["Vector database used for memory storage", "Runs in a Docker container on localhost", "Stores entities, events and decisions"]},
+      "sentence": "The weather in London is grey and wet again today.",
+      "should_match": false,
+      "note": "anchor: clearly unrelated"
+    },
+    {
+      "entity": {"type": "preference", "id": "preference:git-hygiene", "facts": ["Use conventional commit messages", "One logical change per pull request"]},
+      "sentence": "Squashed the branch into a single conventional commit before merging.",
+      "should_match": true,
+      "note": "about conventional-commits / one-change facts"
+    },
+    {
+      "entity": {"type": "preference", "id": "preference:git-hygiene", "facts": ["Use conventional commit messages", "One logical change per pull request"]},
+      "sentence": "The CI pipeline timed out after twenty minutes on the runner.",
+      "should_match": false,
+      "note": "CI infra, not commit/PR hygiene"
+    },
+    {
+      "entity": {"type": "person", "id": "person:dr-brand", "facts": ["Family doctor", "Practice is on the high street"]},
+      "sentence": "Booked an appointment with Dr Brand for Thursday afternoon.",
+      "should_match": true,
+      "note": "about the family-doctor fact"
+    },
+    {
+      "entity": {"type": "person", "id": "person:dr-brand", "facts": ["Family doctor", "Practice is on the high street"]},
+      "sentence": "The brand strategy workshop got pushed to next week.",
+      "should_match": false,
+      "note": "trap: brand strategy, not Dr Brand"
+    },
+    {
+      "entity": {"type": "project", "id": "project:taxman", "facts": ["Trading platform side project", "Has an iOS app and a web dashboard", "Targeting a Q3 2026 release"]},
+      "sentence": "Picked up groceries and a new kettle on the way home.",
+      "should_match": false,
+      "note": "anchor: clearly unrelated"
+    }
+  ]
+}

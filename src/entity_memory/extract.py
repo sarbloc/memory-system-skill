@@ -12,12 +12,22 @@ sentence match an existing entity, so callers can mark *only* those events
 extracted and leave fully-unmatched events as new-entity candidates rather
 than silently burning them.
 
-Performance: the entity corpus is embedded **once** per run via
-``build_entity_index`` and reused across every sentence. The previous code
-re-embedded every entity inside the per-sentence loop, giving
-``O(events × sentences × entities)`` embedding calls — which pegged all cores
-for hours on bulk imports (see issue #12). Matching against a prebuilt index is
-plain cosine arithmetic.
+Matching shape (issue #17): a sentence is compared against each of an entity's
+facts *individually* and scored best-of, NOT against the concatenated
+``build_search_text`` blob. The blob is the centroid of up to 10 different
+facts plus a ``[type] id`` prefix; averaging them together pulls cosine down so
+far that even on-topic sentences rarely clear the gate, and enrichment almost
+never fires (facts fragment into new entities instead). Per-fact matching
+compares like with like. ``build_search_text`` is unchanged — storage and
+search keep the blob; only this enrich path moved to per-fact.
+
+Performance: every fact is embedded **once** per run via
+``build_entity_index`` and the corpus is packed into one normalized matrix, so
+each sentence match is a single ``matrix @ vec`` dot-product (issue #12). The
+previous code re-embedded every entity inside the per-sentence loop, giving
+``O(events × sentences × entities)`` embedding calls. Per-fact indexing adds
+~10× more rows than per-entity, but a matmul over a few thousand rows is
+microseconds — the cost stays in arithmetic, not embedding.
 """
 
 from __future__ import annotations
@@ -27,15 +37,20 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from entity_memory.merge import build_search_text
+import numpy as np
+
 from entity_memory.models import Entity
 
 
-MATCH_THRESHOLD = 0.7
-
-# A prebuilt entity index: each entity paired with its search_text embedding,
-# computed once so the per-sentence match loop is embedding-free.
-EntityIndex = list["tuple[Entity, list[float]]"]
+# Cosine gate for a sentence→fact match. Tuned (issue #17) against the
+# hand-labelled fixture in tests/data/match_pairs.json with the real
+# all-MiniLM-L6-v2 model: per-fact cosines put clearly-related pairs at
+# 0.34–0.73 and unrelated/trap pairs at <=0.16, leaving a clean 0.16→0.34 gap.
+# 0.32 sits in that gap — precision 1.0 with a ~0.16 margin above the worst
+# negative, while still catching weak-but-genuine positives. The old 0.7 (vs a
+# diluted entity-blob vector) almost never fired, fragmenting facts into new
+# entities. Re-run scripts/tune_match_threshold.py to revisit.
+MATCH_THRESHOLD = 0.32
 
 
 class EmbedderLike(Protocol):
@@ -60,22 +75,83 @@ def split_sentences(text: str) -> list[str]:
 
 def cosine_sim(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two vectors."""
-    import numpy as np
-
     a_, b_ = np.array(a), np.array(b)
     denom = np.linalg.norm(a_) * np.linalg.norm(b_)
     return 0.0 if denom == 0 else float(np.dot(a_, b_) / denom)
 
 
-def build_entity_index(entities: list[Entity], embedder: EmbedderLike) -> EntityIndex:
-    """Embed each entity's search_text once, up front.
+@dataclass
+class EntityIndex:
+    """Prebuilt per-fact match index over an entity corpus.
 
-    Returns ``[(entity, vector), ...]``. Building this outside the per-sentence
-    loop is what removes the ``O(events × sentences × entities)`` embedding
-    blowup (issue #12): a run embeds the corpus once, then matches with cosine
-    arithmetic only.
+    Every fact of every entity is embedded once and stored as one row of a
+    normalized matrix, so a sentence match is a single ``matrix @ sent_vec``
+    dot-product followed by an argmax. ``row_owner[r]`` maps matrix row ``r``
+    back to ``entities[row_owner[r]]`` — the entity that fact belongs to.
+
+    Matching best-of over an entity's facts then taking the best entity reduces
+    to a global argmax over all rows, since ``max`` of per-entity ``max`` is the
+    global ``max``. No per-entity grouping needed.
     """
-    return [(entity, embedder.embed(build_search_text(entity))) for entity in entities]
+
+    entities: list[Entity]
+    matrix: np.ndarray  # (n_rows, dim), L2-normalized rows
+    row_owner: np.ndarray  # (n_rows,) int → index into `entities`
+
+    def best_match(
+        self, sent_vec: list[float], threshold: float = MATCH_THRESHOLD
+    ) -> Entity | None:
+        """Entity owning the fact most similar to ``sent_vec``, or None.
+
+        Pure arithmetic — no embedding. Returns the entity whose best-matching
+        fact has cosine >= threshold, else None.
+        """
+        if self.matrix.shape[0] == 0:
+            return None
+        s = np.asarray(sent_vec, dtype=np.float32)
+        norm = float(np.linalg.norm(s))
+        if norm == 0.0:
+            return None
+        scores = self.matrix @ (s / norm)  # cosine: rows already normalized
+        best = int(np.argmax(scores))
+        if float(scores[best]) < threshold:
+            return None
+        return self.entities[int(self.row_owner[best])]
+
+
+def build_entity_index(entities: list[Entity], embedder: EmbedderLike) -> EntityIndex:
+    """Embed every fact once, up front, into a normalized match matrix.
+
+    One row per fact (the ``[type] id`` header is deliberately excluded — entity
+    ids are not natural language and only add noise; see issue #17). Building
+    this outside the per-sentence loop is what removes the
+    ``O(events × sentences × entities)`` embedding blowup (issue #12): a run
+    embeds the corpus once, then matches with matrix arithmetic only.
+
+    An entity with no facts contributes no rows and so can never be enriched —
+    correct: there is nothing to match a sentence against.
+    """
+    ents = list(entities)
+    rows: list[list[float]] = []
+    row_owner: list[int] = []
+    for i, entity in enumerate(ents):
+        for fact in entity.facts:
+            rows.append(embedder.embed(fact.text))
+            row_owner.append(i)
+
+    if rows:
+        matrix = np.asarray(rows, dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0.0] = 1.0
+        matrix = matrix / norms
+    else:
+        matrix = np.zeros((0, 0), dtype=np.float32)
+
+    return EntityIndex(
+        entities=ents,
+        matrix=matrix,
+        row_owner=np.asarray(row_owner, dtype=np.int64),
+    )
 
 
 def match_sentence_to_index(
@@ -85,17 +161,9 @@ def match_sentence_to_index(
 ) -> Entity | None:
     """Best-matching entity for a precomputed sentence vector against an index.
 
-    Pure cosine arithmetic — no embedding. Returns the entity if the best
-    similarity >= threshold, else None.
+    Thin wrapper over ``EntityIndex.best_match`` kept for call-site stability.
     """
-    best_entity = None
-    best_score = 0.0
-    for entity, entity_vec in index:
-        score = cosine_sim(sent_vec, entity_vec)
-        if score > best_score:
-            best_score = score
-            best_entity = entity
-    return best_entity if best_score >= threshold else None
+    return index.best_match(sent_vec, threshold)
 
 
 def match_sentence_to_entity(
@@ -158,7 +226,7 @@ def extract_events(
     """Process a list of events, matching sentences to existing entities.
 
     Builds the entity index once (``build_entity_index``) then matches, so
-    embedding calls scale as ``len(entities) + total_sentences`` rather than
+    embedding calls scale as ``total_facts + total_sentences`` rather than
     their product.
 
     Args:

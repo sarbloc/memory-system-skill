@@ -137,26 +137,21 @@ class TestExtractEvents:
         assert len(result.matched) >= 1
 
     def test_fully_unmatched_event_absent_from_matched_ids(self, embedder):
-        # Two events, one guaranteed match (== search_text), one guaranteed
-        # non-match (cosine < threshold vs the only entity present).
-        from entity_memory.extract import cosine_sim
+        # One event matches (its fact sentence == a fact row → cosine 1.0), one
+        # does not. The gate is 0.95 so only identical text clears it: the
+        # MockEmbedder's all-positive vectors floor cosine near 0.7, so no
+        # distinct short string scores below a default 0.7 gate — a high gate is
+        # the deterministic way to construct a non-match here.
         from entity_memory.merge import build_search_text
 
         entity = _entity("person:alice", "person", ["Manages the auth team"])
-        st = build_search_text(entity)
-        unmatched_text = "grok quaffle."  # verified cosine < 0.7 vs this entity
-        # Guard: if the mock embedder ever changes and this accidentally
-        # matches, skip rather than assert a false negative.
-        if cosine_sim(embedder.embed(unmatched_text), embedder.embed(st)) >= 0.7:
-            import pytest
-
-            pytest.skip("Mock embedder changed: chosen text now matches")
+        st = build_search_text(entity)  # blob; its fact sentence hits the fact row
 
         events = [
             {"id": "match", "text": st},
-            {"id": "nomatch", "text": unmatched_text},
+            {"id": "nomatch", "text": "grok quaffle."},
         ]
-        result = extract_events(events, [entity], embedder, now=NOW)
+        result = extract_events(events, [entity], embedder, now=NOW, threshold=0.95)
         assert "match" in result.matched_event_ids
         assert "nomatch" not in result.matched_event_ids
 
@@ -165,15 +160,16 @@ class TestExtractEvents:
 
 class TestEmbedsCorpusOnce:
     def test_embed_calls_additive_not_multiplicative(self, embedder):
-        """Each entity is embedded once per run, not once per sentence.
+        """Facts are embedded once per run, not re-embedded per sentence.
 
-        This is the canary for the #12 blowup: the old per-sentence
-        re-embedding of the whole corpus made embed calls scale as
-        events × sentences × entities. With the precomputed index it must be
-        len(entities) + total_sentences.
+        Canary for the #12 blowup: the old per-sentence re-embedding of the
+        whole corpus made embed calls scale as events × sentences × entities.
+        With the precomputed per-fact index (issue #17) it must be
+        ``total_facts + total_sentences`` — additive, and proportional to
+        *facts* not entities, so the two-fact entity contributes two rows.
         """
         entities = [
-            _entity("person:alice", "person", ["Manages the auth team"]),
+            _entity("person:alice", "person", ["Manages the auth team", "Based in London"]),
             _entity("project:dash", "project", ["The trading dashboard"]),
             _entity("tool:qdrant", "tool", ["A vector database"]),
         ]
@@ -181,13 +177,15 @@ class TestEmbedsCorpusOnce:
             {"id": "e1", "text": "First sentence here. Second sentence here."},
             {"id": "e2", "text": "Third sentence here. Fourth sentence here."},
         ]
+        total_facts = sum(len(e.facts) for e in entities)  # 4
         total_sentences = 4
         counter = _CountingEmbedder(embedder)
 
         extract_events(events, entities, counter, now=NOW)
 
-        # 3 entity embeds + 4 sentence embeds. The old path would be 4*3 + 4.
-        assert counter.calls == len(entities) + total_sentences
+        # 4 fact embeds + 4 sentence embeds. Multiplicative path: 4*4 + 4;
+        # per-entity (pre-#17) would be 3 + 4. Per-fact is 4 + 4.
+        assert counter.calls == total_facts + total_sentences
 
     def test_with_index_does_not_re_embed_entities(self, embedder):
         """extract_events_with_index embeds only sentences, never entities."""

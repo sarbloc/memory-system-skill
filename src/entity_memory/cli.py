@@ -18,6 +18,7 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
+from entity_memory.extract import MATCH_THRESHOLD
 from entity_memory.merge import build_search_text, compact, drop_expired, merge
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
@@ -185,7 +186,13 @@ def event(text: str, source: str, agent: str):
     "--batch", "batch_size", default=DEFAULT_BATCH_SIZE, show_default=True,
     help="Events per batch; each batch commits and reports progress before the next.",
 )
-def extract(since: str | None, process_all: bool, domain: str, batch_size: int):
+@click.option(
+    "--threshold", default=MATCH_THRESHOLD, show_default=True, type=float,
+    help="Cosine gate for a sentence→fact match. Lower = enrich more aggressively.",
+)
+def extract(
+    since: str | None, process_all: bool, domain: str, batch_size: int, threshold: float
+):
     """Process unextracted events into entity upserts.
 
     Events are processed in batches so a large backlog makes visible,
@@ -210,7 +217,7 @@ def extract(since: str | None, process_all: bool, domain: str, batch_size: int):
 
     summary = run_extraction(
         client, embedder, domain=domain, since=since_dt,
-        batch_size=batch_size, progress=_progress,
+        batch_size=batch_size, threshold=threshold, progress=_progress,
     )
 
     if summary["events_processed"] == 0:
