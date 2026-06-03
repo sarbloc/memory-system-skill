@@ -11,6 +11,13 @@ agent (via the ``memory_store`` tool). This module stays dependency-light
 sentence match an existing entity, so callers can mark *only* those events
 extracted and leave fully-unmatched events as new-entity candidates rather
 than silently burning them.
+
+Performance: the entity corpus is embedded **once** per run via
+``build_entity_index`` and reused across every sentence. The previous code
+re-embedded every entity inside the per-sentence loop, giving
+``O(events × sentences × entities)`` embedding calls — which pegged all cores
+for hours on bulk imports (see issue #12). Matching against a prebuilt index is
+plain cosine arithmetic.
 """
 
 from __future__ import annotations
@@ -20,10 +27,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from entity_memory.models import Entity, Fact
+from entity_memory.merge import build_search_text
+from entity_memory.models import Entity
 
 
 MATCH_THRESHOLD = 0.7
+
+# A prebuilt entity index: each entity paired with its search_text embedding,
+# computed once so the per-sentence match loop is embedding-free.
+EntityIndex = list["tuple[Entity, list[float]]"]
 
 
 class EmbedderLike(Protocol):
@@ -55,6 +67,37 @@ def cosine_sim(a: list[float], b: list[float]) -> float:
     return 0.0 if denom == 0 else float(np.dot(a_, b_) / denom)
 
 
+def build_entity_index(entities: list[Entity], embedder: EmbedderLike) -> EntityIndex:
+    """Embed each entity's search_text once, up front.
+
+    Returns ``[(entity, vector), ...]``. Building this outside the per-sentence
+    loop is what removes the ``O(events × sentences × entities)`` embedding
+    blowup (issue #12): a run embeds the corpus once, then matches with cosine
+    arithmetic only.
+    """
+    return [(entity, embedder.embed(build_search_text(entity))) for entity in entities]
+
+
+def match_sentence_to_index(
+    sent_vec: list[float],
+    index: EntityIndex,
+    threshold: float = MATCH_THRESHOLD,
+) -> Entity | None:
+    """Best-matching entity for a precomputed sentence vector against an index.
+
+    Pure cosine arithmetic — no embedding. Returns the entity if the best
+    similarity >= threshold, else None.
+    """
+    best_entity = None
+    best_score = 0.0
+    for entity, entity_vec in index:
+        score = cosine_sim(sent_vec, entity_vec)
+        if score > best_score:
+            best_score = score
+            best_entity = entity
+    return best_entity if best_score >= threshold else None
+
+
 def match_sentence_to_entity(
     sentence: str,
     entities: list[Entity],
@@ -63,59 +106,34 @@ def match_sentence_to_entity(
 ) -> Entity | None:
     """Find the best matching entity for a sentence by cosine similarity.
 
-    Compares the sentence embedding against each entity's search_text embedding.
-    Returns the entity if similarity >= threshold, else None.
+    Convenience wrapper that builds a one-shot index. For bulk work, build the
+    index once with ``build_entity_index`` and call ``match_sentence_to_index``
+    so the corpus is not re-embedded per sentence.
     """
-    from entity_memory.merge import build_search_text
-
     if not entities:
         return None
-
-    sent_vec = embedder.embed(sentence)
-    best_entity = None
-    best_score = 0.0
-
-    for entity in entities:
-        search_text = build_search_text(entity)
-        entity_vec = embedder.embed(search_text)
-        score = cosine_sim(sent_vec, entity_vec)
-        if score > best_score:
-            best_score = score
-            best_entity = entity
-
-    if best_score >= threshold:
-        return best_entity
-    return None
+    index = build_entity_index(entities, embedder)
+    return match_sentence_to_index(embedder.embed(sentence), index, threshold)
 
 
-def extract_events(
+def extract_events_with_index(
     events: list[dict],
-    entities: list[Entity],
+    index: EntityIndex,
     embedder: EmbedderLike,
     now: datetime | None = None,
+    threshold: float = MATCH_THRESHOLD,
 ) -> ExtractionResult:
-    """Process a list of events, matching sentences to existing entities.
+    """Match sentences in ``events`` against a prebuilt entity index.
 
-    Args:
-        events: list of event dicts with at least "text" and "id" keys
-        entities: all existing entities to match against
-        embedder: embedding model
-        now: current time for fact timestamps
-
-    Returns:
-        ExtractionResult with matched/unmatched sentences
+    Each sentence is embedded once; matching is cosine-only against the index.
     """
-    now = now or datetime.utcnow()
-    today = now.date().isoformat()
-
-    matched = []
-    unmatched = []
+    matched: list[tuple[str, Entity]] = []
+    unmatched: list[str] = []
     matched_event_ids: set[str] = set()
 
     for event in events:
-        sentences = split_sentences(event["text"])
-        for sentence in sentences:
-            entity = match_sentence_to_entity(sentence, entities, embedder)
+        for sentence in split_sentences(event["text"]):
+            entity = match_sentence_to_index(embedder.embed(sentence), index, threshold)
             if entity is not None:
                 matched.append((sentence, entity))
                 matched_event_ids.add(event["id"])
@@ -127,4 +145,34 @@ def extract_events(
         unmatched=unmatched,
         events_processed=len(events),
         matched_event_ids=matched_event_ids,
+    )
+
+
+def extract_events(
+    events: list[dict],
+    entities: list[Entity],
+    embedder: EmbedderLike,
+    now: datetime | None = None,
+    threshold: float = MATCH_THRESHOLD,
+) -> ExtractionResult:
+    """Process a list of events, matching sentences to existing entities.
+
+    Builds the entity index once (``build_entity_index``) then matches, so
+    embedding calls scale as ``len(entities) + total_sentences`` rather than
+    their product.
+
+    Args:
+        events: list of event dicts with at least "text" and "id" keys
+        entities: all existing entities to match against
+        embedder: embedding model
+        now: current time (accepted for caller compatibility; matching itself
+            is time-independent)
+        threshold: cosine gate for a sentence→entity match
+
+    Returns:
+        ExtractionResult with matched/unmatched sentences
+    """
+    index = build_entity_index(entities, embedder)
+    return extract_events_with_index(
+        events, index, embedder, now=now, threshold=threshold
     )

@@ -14,14 +14,13 @@ from entity_memory.client import (
     ensure_collections,
     get_client,
     get_entity,
-    get_unextracted_events,
-    mark_event_extracted,
     scroll_entities,
     store_event,
     upsert_entity,
 )
 from entity_memory.merge import build_search_text, compact, drop_expired, merge
 from entity_memory.models import Entity, Fact
+from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
 
 
 def _get_embedder():
@@ -182,10 +181,17 @@ def event(text: str, source: str, agent: str):
     "--domain", type=click.Choice(DOMAINS), default="shared",
     help="Domain to extract within: shared|dev|personal",
 )
-def extract(since: str | None, process_all: bool, domain: str):
-    """Process unextracted events into entity upserts."""
-    from entity_memory.extract import extract_events
+@click.option(
+    "--batch", "batch_size", default=DEFAULT_BATCH_SIZE, show_default=True,
+    help="Events per batch; each batch commits and reports progress before the next.",
+)
+def extract(since: str | None, process_all: bool, domain: str, batch_size: int):
+    """Process unextracted events into entity upserts.
 
+    Events are processed in batches so a large backlog makes visible,
+    kill-safe progress. Only events that enriched an existing entity are
+    marked extracted; fully-unmatched events stay as new-entity candidates.
+    """
     client = get_client()
     embedder = _get_embedder()
 
@@ -194,36 +200,27 @@ def extract(since: str | None, process_all: bool, domain: str):
         minutes = int(since.rstrip("m"))
         since_dt = datetime.utcnow() - timedelta(minutes=minutes)
 
-    events = get_unextracted_events(client, since=since_dt, domain=domain)
-    if not events:
+    def _progress(info: dict) -> None:
+        click.echo(
+            f"  batch {info['batch']}/{info['total_batches']}: "
+            f"{info['events_in_batch']} events, "
+            f"{info['matched_in_batch']} enriched "
+            f"({info['cumulative_events']}/{info['total_events']} done)"
+        )
+
+    summary = run_extraction(
+        client, embedder, domain=domain, since=since_dt,
+        batch_size=batch_size, progress=_progress,
+    )
+
+    if summary["events_processed"] == 0:
         click.echo("No unextracted events found.")
         return
 
-    entities = scroll_entities(client, domain=domain)
-    now = datetime.utcnow()
-    today = now.date().isoformat()
-
-    result = extract_events(events, entities, embedder, now=now)
-
-    # Merge matched sentences into their entities
-    for sentence, entity in result.matched:
-        new_fact = Fact(text=sentence, added=today, source="extract")
-        merged = merge(entity, [new_fact], embedder, now=now)
-        vector = embedder.embed(build_search_text(merged))
-        upsert_entity(client, merged, vector, domain=domain)
-
-    # Mark extracted ONLY events that enriched an existing entity (>=1 sentence
-    # matched). Fully-unmatched events stay unextracted so they remain
-    # new-entity candidates rather than being silently burned. Mirrors the #13
-    # fix in mcp_server.memory_extract; see issue #14.
-    for event_id in result.matched_event_ids:
-        mark_event_extracted(client, event_id, domain=domain)
-
-    click.echo(f"Processed {result.events_processed} events:")
-    click.echo(f"  {len(result.matched)} sentences matched to entities")
-    click.echo(f"  {len(result.unmatched)} unmatched sentences")
-
-    for s in result.unmatched:
+    click.echo(f"Processed {summary['events_processed']} events:")
+    click.echo(f"  {summary['matched']} sentences matched to entities")
+    click.echo(f"  {summary['unmatched']} unmatched sentences")
+    for s in summary["unmatched_samples"]:
         click.echo(f"  UNMATCHED: \"{s}\"")
 
 

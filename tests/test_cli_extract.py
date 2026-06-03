@@ -122,3 +122,16 @@ def test_invalid_domain_rejected(cli_env):
     result = CliRunner().invoke(main, ["extract", "--all", "--domain", "bogus"])
     assert result.exit_code != 0
     assert "bogus" in result.output
+
+
+def test_batch_flag_reports_progress(cli_env, embedder):
+    """--batch chunks the run and emits a per-batch progress line."""
+    client = cli_env
+    _, st = _seed_entity(client, embedder, "person:alice", "person", ["Manages auth"])
+    for _ in range(3):
+        _seed_event(client, embedder, st)  # all match the entity
+
+    result = CliRunner().invoke(main, ["extract", "--all", "--batch", "1"])
+    assert result.exit_code == 0, result.output
+    assert "Processed 3 events" in result.output
+    assert "batch 1/3" in result.output  # progress emitted per batch

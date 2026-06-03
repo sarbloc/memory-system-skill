@@ -29,9 +29,9 @@ from entity_memory.client import (
     store_event,
     upsert_entity,
 )
-from entity_memory.extract import extract_events
 from entity_memory.merge import build_search_text, compact, merge
 from entity_memory.models import Entity, Fact
+from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
 from entity_memory.search import format_results, search_entities
 
 EVENT_TTL_DAYS = 30
@@ -207,8 +207,19 @@ def memory_extract(
     domain: str = "shared",
     since_minutes: int | None = None,
     process_all: bool = False,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> dict[str, Any]:
-    """Process unextracted events into entity upserts within a domain."""
+    """Process unextracted events into entity upserts within a domain.
+
+    Events are processed in batches (batch_size); each batch upserts its
+    enriched entities and marks ONLY its matched events extracted before the
+    next batch, so a large backlog makes incremental, kill-safe progress.
+    Fully-unmatched events stay unextracted so an external LLM agent can turn
+    them into new entities via memory_store, then call memory_event_resolve.
+    (Tradeoff: an event with a MIX of matched and unmatched sentences is marked
+    extracted because >=1 matched, so its unmatched sentences are not separately
+    surfaced. Acceptable for now.)
+    """
     _validate_domain(domain)
     client = get_client()
     embedder = _embedder_instance()
@@ -217,43 +228,9 @@ def memory_extract(
     if since_minutes is not None and not process_all:
         since_dt = datetime.utcnow() - timedelta(minutes=since_minutes)
 
-    events = get_unextracted_events(client, since=since_dt, domain=domain)
-    if not events:
-        return {
-            "events_processed": 0,
-            "matched": 0,
-            "unmatched": 0,
-            "matched_events": 0,
-            "unmatched_samples": [],
-        }
-
-    entities = scroll_entities(client, domain=domain)
-    now = datetime.utcnow()
-    today = now.date().isoformat()
-    result = extract_events(events, entities, embedder, now=now)
-
-    for sentence, entity in result.matched:
-        new_fact = Fact(text=sentence, added=today, source="extract")
-        merged = merge(entity, [new_fact], embedder, now=now)
-        vector = embedder.embed(build_search_text(merged))
-        upsert_entity(client, merged, vector, domain=domain)
-
-    # Mark extracted ONLY events that enriched an existing entity (>=1 sentence
-    # matched). Fully-unmatched events stay unextracted so an external LLM agent
-    # can turn them into new entities via memory_store, then call
-    # memory_event_resolve. (Tradeoff: an event with a MIX of matched and
-    # unmatched sentences is marked extracted because >=1 matched, so its
-    # unmatched sentences are not separately surfaced. Acceptable for now.)
-    for event_id in result.matched_event_ids:
-        mark_event_extracted(client, event_id, domain=domain)
-
-    return {
-        "events_processed": result.events_processed,
-        "matched": len(result.matched),
-        "unmatched": len(result.unmatched),
-        "matched_events": len(result.matched_event_ids),
-        "unmatched_samples": result.unmatched[:10],
-    }
+    return run_extraction(
+        client, embedder, domain=domain, since=since_dt, batch_size=batch_size,
+    )
 
 
 @mcp.tool()
