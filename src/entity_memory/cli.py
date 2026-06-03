@@ -7,6 +7,7 @@ import click
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from entity_memory.client import (
+    DOMAINS,
     collection_name,
     collection_stats,
     delete_entity,
@@ -177,7 +178,11 @@ def event(text: str, source: str, agent: str):
 @main.command()
 @click.option("--since", default=None, help="Process events from last N minutes (e.g. 55m)")
 @click.option("--all", "process_all", is_flag=True, help="Process all unextracted events")
-def extract(since: str | None, process_all: bool):
+@click.option(
+    "--domain", type=click.Choice(DOMAINS), default="shared",
+    help="Domain to extract within: shared|dev|personal",
+)
+def extract(since: str | None, process_all: bool, domain: str):
     """Process unextracted events into entity upserts."""
     from entity_memory.extract import extract_events
 
@@ -189,12 +194,12 @@ def extract(since: str | None, process_all: bool):
         minutes = int(since.rstrip("m"))
         since_dt = datetime.utcnow() - timedelta(minutes=minutes)
 
-    events = get_unextracted_events(client, since=since_dt)
+    events = get_unextracted_events(client, since=since_dt, domain=domain)
     if not events:
         click.echo("No unextracted events found.")
         return
 
-    entities = scroll_entities(client)
+    entities = scroll_entities(client, domain=domain)
     now = datetime.utcnow()
     today = now.date().isoformat()
 
@@ -205,11 +210,14 @@ def extract(since: str | None, process_all: bool):
         new_fact = Fact(text=sentence, added=today, source="extract")
         merged = merge(entity, [new_fact], embedder, now=now)
         vector = embedder.embed(build_search_text(merged))
-        upsert_entity(client, merged, vector)
+        upsert_entity(client, merged, vector, domain=domain)
 
-    # Mark events as extracted
-    for ev in events:
-        mark_event_extracted(client, ev["id"])
+    # Mark extracted ONLY events that enriched an existing entity (>=1 sentence
+    # matched). Fully-unmatched events stay unextracted so they remain
+    # new-entity candidates rather than being silently burned. Mirrors the #13
+    # fix in mcp_server.memory_extract; see issue #14.
+    for event_id in result.matched_event_ids:
+        mark_event_extracted(client, event_id, domain=domain)
 
     click.echo(f"Processed {result.events_processed} events:")
     click.echo(f"  {len(result.matched)} sentences matched to entities")
