@@ -203,7 +203,13 @@ def get_entity(
 def upsert_entity(
     client: QdrantClient, entity: Entity, vector: list[float], *, domain: str = "shared",
 ) -> None:
-    """Upsert an entity into the appropriate (domain, kind) collection."""
+    """Upsert an entity into the appropriate (domain, kind) collection.
+
+    Low-level primitive: it trusts the entity's facts to be already valid-time
+    consistent (no future ``valid_from``). That invariant is enforced at the
+    public write boundaries (``memory_store`` / CLI ``store`` / ``import``), not
+    here, so the default ``is_current`` view stays equal to "valid now" (#24).
+    """
     kind = "decisions" if entity.type == "decision" else "entities"
     point = entity_to_point(entity, vector)
     client.upsert(collection_name=collection_name(domain, kind), points=[point])

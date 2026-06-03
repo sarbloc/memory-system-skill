@@ -51,6 +51,25 @@ def export_markdown(entities: list[Entity], out: TextIO) -> None:
         out.write("\n")
 
 
+def reject_future_valid_from(entities: list[Entity], today: str) -> None:
+    """Raise ``ValueError`` if any fact is dated to take effect after ``today``.
+
+    Future-effective dating isn't supported yet (issue #24): the default
+    ``is_current`` view treats a fact as live the moment it isn't superseded,
+    which only holds for backdated/same-day facts. Import enforces the same
+    invariant the store path guards at write time, so a hand-edited backup can't
+    sneak a not-yet-effective fact into the current search view.
+    """
+    for e in entities:
+        for f in e.facts:
+            if f.valid_from is not None and f.valid_from[:10] > today:
+                raise ValueError(
+                    f"backup has a future valid_from {f.valid_from!r} on {e.id} "
+                    f"(today is {today}); future-effective dating is not supported "
+                    f"yet (issue #24)"
+                )
+
+
 def import_json(data: list[dict]) -> list[Entity]:
     """Parse a JSON export back into Entity objects."""
     entities = []

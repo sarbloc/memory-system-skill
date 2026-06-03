@@ -437,7 +437,7 @@ def export_cmd(fmt: str):
 def import_cmd(file: str):
     """Import entities from a JSON export. Runs merge logic (won't duplicate)."""
     import json as json_mod
-    from entity_memory.export import import_json
+    from entity_memory.export import import_json, reject_future_valid_from
 
     client = get_client()
     ensure_collections(client)
@@ -448,6 +448,13 @@ def import_cmd(file: str):
         data = json_mod.load(f)
 
     imported = import_json(data)
+    # Validate the whole backup before writing anything, so a bad fact aborts the
+    # import atomically rather than half-applying it (issue #24).
+    try:
+        reject_future_valid_from(imported, now.date().isoformat())
+    except ValueError as exc:
+        raise click.ClickException(str(exc))
+
     for entity in imported:
         existing = get_entity(client, entity.id)
         if existing is None:

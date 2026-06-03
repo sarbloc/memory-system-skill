@@ -100,6 +100,23 @@ def merge(
     entity.facts = drop_expired(entity.facts, now)
 
     for new_fact in new_facts:
+        # An incoming fact that is ALREADY superseded is immutable history (e.g.
+        # replayed from a backup import). It must never dedup/merge into a current
+        # fact — that would drop its supersession metadata — so append it straight
+        # to history, deduped against existing history by (text, superseded_at) so
+        # a repeated import stays idempotent (issue #21). No embedding needed:
+        # history doesn't feed the current vector.
+        if not new_fact.is_current:
+            already = any(
+                f.text == new_fact.text
+                and f.superseded_at == new_fact.superseded_at
+                for f in entity.facts
+                if not f.is_current
+            )
+            if not already:
+                entity.facts.append(new_fact)
+            continue
+
         ensure_embedded(new_fact, embedder)
         # Dedup only against *current* facts (issue #21). Superseded facts are
         # immutable history: a re-asserted fact must not revive or mutate them —

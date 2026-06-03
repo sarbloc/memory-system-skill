@@ -356,6 +356,29 @@ class TestMergeDedupAgainstCurrentOnly:
         assert superseded[0].superseded_at == "2026-03-01"
         assert superseded[0].hit_count == 1
 
+    def test_merge_preserves_incoming_superseded_history(self, embedder):
+        # Replaying history (e.g. a backup import) must not merge a superseded
+        # incoming fact into a current one, and must be idempotent — re-importing
+        # the same history adds nothing (issue #21, Codex review PR #23).
+        def history():
+            return [
+                _fact("lives in London", added="2026-01-01",
+                      superseded_at="2026-03-01", superseded_by="lives in Berlin"),
+                _fact("lives in Berlin", added="2026-03-01"),
+            ]
+
+        entity = Entity(id="person:alice", type="person")
+        merge(entity, history(), embedder, now=NOW)
+        merge(entity, history(), embedder, now=NOW)  # re-import the same backup
+
+        london = [f for f in entity.facts if f.text == "lives in London"]
+        berlin = [f for f in entity.facts if f.text == "lives in Berlin"]
+        assert len(london) == 1                         # no duplicated history
+        assert london[0].superseded_at == "2026-03-01"  # supersession preserved
+        assert london[0].is_current is False
+        assert len(berlin) == 1
+        assert berlin[0].is_current is True
+
     def test_dedup_takes_earlier_valid_from(self, embedder):
         # Re-asserting a fact with an earlier valid_from widens the valid-time
         # window backwards; dedup must keep the earlier start, not drop it

@@ -3,7 +3,14 @@
 import io
 import json
 
-from entity_memory.export import export_json, export_markdown, import_json
+import pytest
+
+from entity_memory.export import (
+    export_json,
+    export_markdown,
+    import_json,
+    reject_future_valid_from,
+)
 from entity_memory.models import Entity, Fact
 
 
@@ -151,3 +158,27 @@ class TestExportImportTemporal:
         out = io.StringIO()
         export_markdown([_temporal_entity()], out)
         assert "[superseded 2026-03-01]" in out.getvalue()
+
+
+class TestRejectFutureValidFrom:
+    """Import must not let a future-dated fact into the current view (issue #24)."""
+
+    def test_future_valid_from_raises(self):
+        ents = [Entity(id="person:alice", type="person", facts=[
+            Fact(text="moves to Mars", added="2026-01-01", source="e",
+                 valid_from="2099-01-01"),
+        ])]
+        with pytest.raises(ValueError):
+            reject_future_valid_from(ents, today="2026-06-03")
+
+    def test_past_same_day_and_none_pass(self):
+        # Backdated, same-day, and absent valid_from are all fine — only a date
+        # strictly after today is rejected.
+        ents = [Entity(id="person:alice", type="person", facts=[
+            Fact(text="backdated", added="2026-06-03", source="e",
+                 valid_from="2026-01-01"),
+            Fact(text="same day", added="2026-06-03", source="e",
+                 valid_from="2026-06-03"),
+            Fact(text="no valid_from", added="2026-06-03", source="e"),
+        ])]
+        reject_future_valid_from(ents, today="2026-06-03")  # must not raise
