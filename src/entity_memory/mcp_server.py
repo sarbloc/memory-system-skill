@@ -193,6 +193,11 @@ def memory_search(
     date, e.g. "2025-06-01") to see each entity as it was on that date — facts
     valid then are returned, later/replaced ones are not. Use ``memory_get`` for
     the full, unfiltered record including history.
+
+    Limitation: ranking uses the entity's current-state vector, so ``as_of``
+    projects history onto entities that current-state recall already surfaces —
+    it cannot retrieve one whose only matching term lives in a superseded fact
+    (no historical vector is kept). Historical-only findability is issue #25.
     """
     _validate_domain(domain)
     client = get_client()

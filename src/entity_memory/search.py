@@ -75,6 +75,10 @@ def search_entities(
     that date (issue #21). Entities with no facts valid at that date are dropped,
     and the limit is applied AFTER projection so they don't squat the top slots.
     Use ``memory_get`` for the full, unfiltered record.
+
+    Retrieval ranks on the stored current-state vector (see ``_project_temporal``),
+    so ``as_of`` projects history onto entities current recall already surfaces;
+    it cannot find one whose only match is a superseded fact (issue #25).
     """
     query_vector = embedder.embed(query)
 
