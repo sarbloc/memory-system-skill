@@ -44,7 +44,8 @@ without any file via environment variables:
 - `QDRANT_API_KEY` — API key, if your Qdrant requires one
 - `ENTITY_MEMORY_CONFIG` — path to a config JSON (overrides the default location)
 
-Or drop a config file at `~/.config/entity-memory/config.json`:
+Or drop a config file at `~/.config/entity-memory/config.json` (honors
+`$XDG_CONFIG_HOME` when set to an absolute path):
 
 ```json
 {

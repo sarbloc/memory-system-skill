@@ -17,6 +17,7 @@ def isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("QDRANT_URL", raising=False)
     monkeypatch.delenv("ENTITY_MEMORY_CONFIG", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     return tmp_path
 
 
@@ -86,3 +87,23 @@ class TestLoadConfig:
         _write(isolated_home / ".config" / "entity-memory" / "config.json",
                {"qdrant": {"url": "http://xdg:6333"}})
         assert load_config()["qdrant"]["url"] == "http://explicit:6333"
+
+    def test_xdg_config_home_is_honored(self, isolated_home, tmp_path, monkeypatch):
+        # When XDG_CONFIG_HOME points elsewhere, the config is read from there,
+        # not from ~/.config.
+        xdg_dir = tmp_path / "custom_xdg"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_dir))
+        _write(xdg_dir / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://xdghome:6333"}})
+        # A file at the default ~/.config location must be ignored in favor of XDG.
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://default:6333"}})
+        assert load_config()["qdrant"]["url"] == "http://xdghome:6333"
+
+    def test_relative_xdg_config_home_ignored(self, isolated_home, monkeypatch):
+        # The XDG spec says a relative $XDG_CONFIG_HOME is invalid and must be
+        # ignored — we fall back to ~/.config rather than resolving it against cwd.
+        monkeypatch.setenv("XDG_CONFIG_HOME", "relative/path")
+        _write(isolated_home / ".config" / "entity-memory" / "config.json",
+               {"qdrant": {"url": "http://default:6333"}})
+        assert load_config()["qdrant"]["url"] == "http://default:6333"

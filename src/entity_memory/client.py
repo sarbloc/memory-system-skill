@@ -63,6 +63,18 @@ ALL_COLLECTIONS = [collection_name(d, k) for d in DOMAINS for k in COLLECTION_KI
 COLLECTIONS = [collection_name("shared", k) for k in COLLECTION_KINDS]
 
 
+def _xdg_config_home() -> Path:
+    """Base config dir per the XDG spec.
+
+    ``$XDG_CONFIG_HOME`` when set to an absolute path, else ``~/.config``. The
+    spec says a relative value is invalid and must be ignored, so we fall back.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg and os.path.isabs(xdg):
+        return Path(xdg)
+    return Path.home() / ".config"
+
+
 def _config_search_paths() -> list[Path]:
     """Default config file locations, highest precedence first.
 
@@ -71,7 +83,7 @@ def _config_search_paths() -> list[Path]:
     installs keep resolving unchanged.
     """
     return [
-        Path.home() / ".config" / "entity-memory" / "config.json",
+        _xdg_config_home() / "entity-memory" / "config.json",
         Path.home() / ".openclaw" / "memory.json",
     ]
 
