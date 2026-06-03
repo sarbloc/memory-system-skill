@@ -50,6 +50,15 @@ class TestLoadConfig:
         monkeypatch.setenv("ENTITY_MEMORY_CONFIG", str(cfg_file))
         assert load_config()["qdrant"]["url"] == "http://explicit:6333"
 
+    def test_explicit_config_missing_raises(self, isolated_home, monkeypatch):
+        # A set-but-missing ENTITY_MEMORY_CONFIG must error, not silently fall
+        # back to XDG/legacy and connect to a Qdrant the operator didn't pick.
+        _write(isolated_home / ".openclaw" / "memory.json",
+               {"qdrant": {"url": "http://legacy:6333"}})
+        monkeypatch.setenv("ENTITY_MEMORY_CONFIG", str(isolated_home / "nope.json"))
+        with pytest.raises(FileNotFoundError):
+            load_config()
+
     def test_legacy_openclaw_path_still_read(self, isolated_home):
         # Back-compat: existing OpenClaw/Endurance installs keep resolving.
         _write(isolated_home / ".openclaw" / "memory.json",
