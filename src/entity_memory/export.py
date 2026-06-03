@@ -24,6 +24,12 @@ def export_json(entities: list[Entity], out: TextIO) -> None:
                     "expires": f.expires,
                     "last_seen": f.last_seen,
                     "hit_count": f.hit_count,
+                    # Bi-temporal fields (issue #21): without these, a backup
+                    # round-trip would silently turn superseded history back into
+                    # current facts and lose valid-time provenance.
+                    "valid_from": f.valid_from,
+                    "superseded_at": f.superseded_at,
+                    "superseded_by": f.superseded_by,
                 }
                 for f in e.facts
             ],
@@ -38,7 +44,10 @@ def export_markdown(entities: list[Entity], out: TextIO) -> None:
         out.write(f"## {e.id}\n")
         for f in e.facts:
             expires = f" [expires {f.expires}]" if f.expires else ""
-            out.write(f"- {f.text} (x{f.hit_count}, since {f.added}){expires}\n")
+            superseded = f" [superseded {f.superseded_at}]" if f.superseded_at else ""
+            out.write(
+                f"- {f.text} (x{f.hit_count}, since {f.added}){expires}{superseded}\n"
+            )
         out.write("\n")
 
 
@@ -54,6 +63,10 @@ def import_json(data: list[dict]) -> list[Entity]:
                 expires=f.get("expires"),
                 last_seen=f.get("last_seen"),
                 hit_count=f.get("hit_count", 1),
+                # .get() so pre-#21 backups (without these keys) still import.
+                valid_from=f.get("valid_from"),
+                superseded_at=f.get("superseded_at"),
+                superseded_by=f.get("superseded_by"),
             )
             for f in item.get("facts", [])
         ]

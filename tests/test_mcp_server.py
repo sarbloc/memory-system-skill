@@ -292,3 +292,64 @@ class TestMemoryStoreSupersession:
         cur = mcp_server.memory_search("alice", domain="shared")
         alice_now = next(h for h in cur if h["id"] == "person:alice")
         assert {f["text"] for f in alice_now["facts"]} == {"lives in Berlin"}
+
+    def test_future_supersession_stays_visible_until_date(self, mcp_env):
+        # A supersession with a future effective date must NOT hide the old fact
+        # now — the change hasn't happened yet (Codex review, PR #23). Far-future
+        # date so it is always ahead of the real test-run "today".
+        mcp_server.memory_store("person", "alice", "lives in London", domain="shared")
+        mcp_server.memory_store(
+            "person", "alice", "lives in Berlin", domain="shared",
+            supersedes="lives in London", valid_from="2099-01-01",
+        )
+        # Default (today): London still in effect; Berlin not yet.
+        hits = mcp_server.memory_search("alice", domain="shared")
+        alice = next(h for h in hits if h["id"] == "person:alice")
+        texts = {f["text"] for f in alice["facts"]}
+        assert "lives in London" in texts
+        assert "lives in Berlin" not in texts
+
+        # As of after the effective date: Berlin in effect, London retired.
+        future = mcp_server.memory_search("alice", domain="shared", as_of="2099-02-01")
+        alice_future = next(h for h in future if h["id"] == "person:alice")
+        assert {f["text"] for f in alice_future["facts"]} == {"lives in Berlin"}
+
+
+# ── as_of search: filter empties before applying the limit (issue #21) ──
+
+class TestSearchTemporalLimit:
+    def test_as_of_drops_empties_before_limit(self, mcp_env, embedder):
+        client = mcp_env
+        # Four entities matching "status report" but all superseded before the
+        # as_of date (so they project to empty), plus one still valid then. With
+        # limit=1 the valid one must win — empties must not consume the slot
+        # (Codex review of PR #23). Old code sliced to limit BEFORE projecting and
+        # would return an empty-fact hit instead.
+        for i in range(4):
+            e = Entity(
+                id=f"project:dead{i}", type="project",
+                facts=[Fact(
+                    text=f"status report {i}", added="2026-01-01", source="t",
+                    last_seen="2026-01-01", superseded_at="2026-02-01",
+                )],
+                last_updated="2026-01-01T00:00:00",
+            )
+            upsert_entity(
+                client, e,
+                embedder.embed(build_search_text(e, now=datetime(2026, 1, 1))),
+                domain="shared",
+            )
+        alive = Entity(
+            id="project:alive", type="project",
+            facts=[Fact(text="status report alive", added="2026-01-01", source="t",
+                        last_seen="2026-01-01")],
+            last_updated="2026-01-01T00:00:00",
+        )
+        upsert_entity(
+            client, alive, embedder.embed(build_search_text(alive)), domain="shared"
+        )
+
+        hits = mcp_server.memory_search(
+            "status report", domain="shared", as_of="2026-03-01", limit=1,
+        )
+        assert [h["id"] for h in hits] == ["project:alive"]

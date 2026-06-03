@@ -242,6 +242,20 @@ class TestBuildSearchText:
         assert "lives in Berlin" in text
         assert "London" not in text
 
+    def test_future_supersession_still_feeds_vector(self):
+        # A fact superseded with a *future* effective date is still true now, so
+        # it must keep feeding the vector until that date — using valid_at, not
+        # is_current (Codex review, PR #23).
+        entity = Entity(id="person:alice", type="person")
+        entity.facts = [
+            _fact("lives in London", added="2026-01-01",
+                  superseded_at="2099-01-01", superseded_by="lives in Berlin"),
+        ]
+        # NOW (2026-03-10) is before the effective date → still indexed.
+        assert "London" in build_search_text(entity, now=NOW)
+        # After the effective date → drops out.
+        assert "London" not in build_search_text(entity, now=datetime(2099, 6, 1))
+
 
 # ── bi-temporal Fact predicates (issue #21) ──────────────
 
