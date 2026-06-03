@@ -1,2 +1,0 @@
-[console_scripts]
-memory = entity_memory.cli:main
