@@ -63,17 +63,77 @@ ALL_COLLECTIONS = [collection_name(d, k) for d in DOMAINS for k in COLLECTION_KI
 COLLECTIONS = [collection_name("shared", k) for k in COLLECTION_KINDS]
 
 
+def _xdg_config_home() -> Path:
+    """Base config dir per the XDG spec.
+
+    ``$XDG_CONFIG_HOME`` when set to an absolute path, else ``~/.config``. The
+    spec says a relative value is invalid and must be ignored, so we fall back.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg and os.path.isabs(xdg):
+        return Path(xdg)
+    return Path.home() / ".config"
+
+
+def _config_search_paths() -> list[Path]:
+    """Default config file locations, highest precedence first.
+
+    Consulted only when ``ENTITY_MEMORY_CONFIG`` is unset. The legacy
+    ``~/.openclaw/memory.json`` path is kept last so existing OpenClaw/Endurance
+    installs keep resolving unchanged.
+    """
+    return [
+        _xdg_config_home() / "entity-memory" / "config.json",
+        Path.home() / ".openclaw" / "memory.json",
+    ]
+
+
 def load_config() -> dict:
-    """Load config from ~/.openclaw/memory.json, falling back to defaults."""
-    config_path = Path.home() / ".openclaw" / "memory.json"
-    defaults = {
+    """Resolve Qdrant config from env vars and standard file locations.
+
+    Precedence, highest first:
+
+    1. ``QDRANT_URL`` env var — point at any Qdrant with no config file at all.
+    2. ``ENTITY_MEMORY_CONFIG`` env var — explicit path to a config JSON. When
+       set it is the *only* file consulted; if it's missing we raise rather than
+       silently using a different Qdrant — unless ``QDRANT_URL`` is also set,
+       which is higher precedence and supplies the url without needing a file.
+    3. ``~/.config/entity-memory/config.json`` — default config location.
+    4. ``~/.openclaw/memory.json`` — legacy OpenClaw path, kept for back-compat.
+    5. Built-in defaults (localhost Qdrant).
+
+    The chosen config file's top-level keys overlay the defaults; ``QDRANT_URL``
+    then overrides the resolved url, so a deployment can point at a different
+    Qdrant without editing any file.
+    """
+    config: dict = {
         "qdrant": {"url": "http://127.0.0.1:6333", "api_key_env": "QDRANT_API_KEY"},
     }
-    if config_path.exists():
-        with open(config_path) as f:
-            user_config = json.load(f)
-        defaults.update(user_config)
-    return defaults
+    url_override = os.environ.get("QDRANT_URL")
+    explicit = os.environ.get("ENTITY_MEMORY_CONFIG")
+    if explicit:
+        explicit_path = Path(explicit)
+        if explicit_path.exists():
+            with open(explicit_path) as f:
+                config.update(json.load(f))
+        elif not url_override:
+            # Operator pointed at a config we can't read and gave no QDRANT_URL
+            # to fall back on — abort rather than silently using another Qdrant.
+            raise FileNotFoundError(
+                f"ENTITY_MEMORY_CONFIG points at {explicit!r}, which does not "
+                "exist; set QDRANT_URL or fix the path."
+            )
+        # else: QDRANT_URL (higher precedence) supplies the url below, so a
+        # missing explicit file is non-fatal.
+    else:
+        for path in _config_search_paths():
+            if path.exists():
+                with open(path) as f:
+                    config.update(json.load(f))
+                break
+    if url_override:
+        config.setdefault("qdrant", {})["url"] = url_override
+    return config
 
 
 def get_client(config: dict | None = None) -> QdrantClient:

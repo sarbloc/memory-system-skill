@@ -1,0 +1,4 @@
+qdrant-client>=1.12
+sentence-transformers>=3.0
+click>=8.0
+numpy>=1.24

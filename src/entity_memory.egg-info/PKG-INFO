@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: entity-memory
+Version: 0.1.0
+Summary: Entity-based persistent memory with semantic search for OpenClaw agents
+Requires-Python: >=3.11
+Requires-Dist: qdrant-client>=1.12
+Requires-Dist: sentence-transformers>=3.0
+Requires-Dist: click>=8.0
+Requires-Dist: numpy>=1.24
