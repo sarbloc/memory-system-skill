@@ -34,6 +34,33 @@ Qdrant runs as a single Docker container (~50MB image, ~100MB RAM).
 
 ## Data Model
 
+### Additive write-time shadow queue (2026-10)
+
+New raw `store_event` writes atomically include `shadow_version=2`,
+`shadow_state=pending`, and `shadow_written_at` (UTC milliseconds) on the
+same Qdrant point. The write waits for acknowledgement. This is metadata,
+not a second text store, LLM call, extraction gate, or retention change.
+CLI and MCP event writes share the capture point; direct entity writes do not.
+
+`memory_shadow_events(domain, since_ms, limit<=51)` projects bounded raw
+event text and shadow state independently of `extracted`. The consumer must
+persist its first activation cutoff across restarts; legacy events have no
+marker and are never backfilled. Queue pages are UUID-ordered, not oldest-first.
+Counts describe currently retained marked events since the cutoff, NOT
+lifetime totals: normal TTL, expiry, and deletion can remove pending work.
+Oversized text (>4000 characters) is represented as null, never truncated.
+
+`memory_shadow_mark(domain, event_id, state)` advances pending -> attempted
+-> done (or pending -> done for skips), changing only the shadow field.
+Repeated attempt claims are refused; attempted work is never reset/retried.
+These read/modify/write transitions assume ONE dedicated consumer; they are
+not atomic CAS or a multi-worker permission boundary. Agent profiles should
+not be granted either tool. The memory backend never receives a Jev key.
+
+Memory storage/extraction/retention remain deterministic and unchanged.
+An opt-in external consumer can classify already-written text in shadow mode;
+there is no automatic rejection or promotion based on that classification.
+
 ### Three collections in Qdrant
 
 #### 1. `entities` — long-term knowledge (grows sub-linearly)

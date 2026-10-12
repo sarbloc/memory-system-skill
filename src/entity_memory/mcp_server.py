@@ -34,6 +34,7 @@ from entity_memory.merge import build_search_text, compact, mark_superseded, mer
 from entity_memory.models import Entity, Fact
 from entity_memory.pipeline import DEFAULT_BATCH_SIZE, run_extraction
 from entity_memory.search import format_results, search_entities
+from entity_memory.shadow import shadow_events, shadow_mark
 
 EVENT_TTL_DAYS = 30
 
@@ -347,6 +348,32 @@ def memory_event_resolve(
         client, event_id, domain=domain, resolved_into=created_entity_id,
     )
     return {"resolved": event_id, "created_entity_id": created_entity_id}
+
+
+@mcp.tool()
+def memory_shadow_events(domain: str, since_ms: int, limit: int = 51) -> dict:
+    """List write-time shadow work, including extracted events; no historical scan.
+
+    since_ms is a consumer-persisted UTC activation cutoff. Only version-2
+    markers written after it are eligible. Counts cover retained events since
+    that cutoff (not lifetime totals; normal TTL/deletion remains in force).
+    Bounded UUID-ordered pages; no chronological-order guarantee. Oversized
+    text is null, not truncated. Intended for one dedicated shadow worker,
+    not agent profiles. This tool never calls an external classifier.
+    """
+    _validate_domain(domain)
+    return shadow_events(get_client(), domain=domain, since_ms=since_ms, limit=limit)
+
+
+@mcp.tool()
+def memory_shadow_mark(domain: str, event_id: str, state: str) -> dict:
+    """Mark shadow work attempted/done without resolving or rewriting memory.
+
+    No claim of multi-consumer CAS. attempted cannot return to pending; a
+    consumer must never retry attempted work with an unknown outcome.
+    """
+    _validate_domain(domain)
+    return shadow_mark(get_client(), domain=domain, event_id=event_id, state=state)
 
 
 @mcp.tool()

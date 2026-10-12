@@ -77,6 +77,98 @@ def _seed_entity(client, embedder, eid, etype, fact_texts, *, domain="shared"):
     return entity, st
 
 
+class TestWriteTimeShadow:
+    def test_capture_survives_immediate_extraction(self, mcp_env, embedder):
+        eid = _seed_event(mcp_env, embedder, "Stable observation.", domain="dev")
+        mcp_server.memory_event_resolve(eid, domain="dev")
+        assert mcp_server.memory_events_unextracted(domain="dev")["returned"] == 0
+        result = mcp_server.memory_shadow_events("dev", since_ms=0)
+        assert result["written"] == result["pending"] == result["returned"] == 1
+        assert result["events"][0]["id"] == eid
+        assert result["events"][0]["state"] == "pending"
+
+    def test_event_and_marker_are_in_one_upsert(self, mcp_env, embedder, monkeypatch):
+        from unittest.mock import Mock
+        real = mcp_env.upsert
+        spy = Mock(wraps=real)
+        monkeypatch.setattr(mcp_env, "upsert", spy)
+        result = mcp_server.memory_event("Fresh observation.", domain="personal")
+        assert spy.call_count == 1
+        assert spy.call_args.kwargs["wait"] is True
+        payload = spy.call_args.kwargs["points"][0].payload
+        assert payload["shadow_version"] == 2
+        assert payload["shadow_state"] == "pending"
+        assert payload["text"] == "Fresh observation."
+        assert result["domain"] == "personal"
+
+    def test_marking_does_not_modify_memory(self, mcp_env, embedder):
+        eid = _seed_event(mcp_env, embedder, "Do not rewrite me.")
+        before = mcp_env.retrieve("events", [eid], with_vectors=True)[0]
+        assert mcp_server.memory_shadow_mark("shared", eid, "attempted")["updated"]
+        assert not mcp_server.memory_shadow_mark("shared", eid, "attempted")["updated"]
+        assert mcp_server.memory_shadow_mark("shared", eid, "done")["updated"]
+        assert mcp_server.memory_shadow_mark("shared", eid, "done")["updated"]
+        after = mcp_env.retrieve("events", [eid], with_vectors=True)[0]
+        assert before.vector == after.vector
+        expected = {**before.payload, "shadow_state": "done"}
+        assert after.payload == expected
+        assert mcp_server.memory_shadow_events("shared", 0)["returned"] == 0
+        assert mcp_server.memory_shadow_events("shared", 0)["done"] == 1
+
+    def test_attempted_work_survives_a_consumer_restart(self, mcp_env, embedder):
+        eid = _seed_event(mcp_env, embedder, "Crash-safe work.")
+        mcp_server.memory_shadow_mark("shared", eid, "attempted")
+        result = mcp_server.memory_shadow_events("shared", 0)
+        assert result["attempted"] == 1
+        assert result["events"][0]["state"] == "attempted"
+
+    def test_missing_and_legacy_points_are_not_created_or_backfilled(self, mcp_env, embedder):
+        missing = str(uuid.uuid4())
+        assert not mcp_server.memory_shadow_mark("shared", missing, "done")["updated"]
+        eid = _seed_event(mcp_env, embedder, "Legacy event.")
+        mcp_env.delete_payload("events", keys=["shadow_version"], points=[eid])
+        assert mcp_server.memory_shadow_events("shared", 0)["written"] == 0
+        assert not mcp_server.memory_shadow_mark("shared", eid, "attempted")["updated"]
+
+    def test_cutoff_is_write_time_not_event_time_and_domains_are_explicit(self, mcp_env, embedder):
+        eid = _seed_event(mcp_env, embedder, "Old source timestamp, new write.", domain="dev")
+        result = mcp_server.memory_shadow_events("dev", 0)
+        cutoff = result["events"][0]["written_at"]
+        assert mcp_server.memory_shadow_events("dev", cutoff)["returned"] == 1
+        assert mcp_server.memory_shadow_events("dev", cutoff + 1)["returned"] == 0
+        assert mcp_server.memory_shadow_events("personal", 0)["written"] == 0
+        with pytest.raises(ValueError):
+            mcp_server.memory_shadow_events("invalid", 0)
+        with pytest.raises(ValueError):
+            mcp_server.memory_shadow_mark("shared", eid, "pending")
+
+    def test_counts_are_not_limited_to_the_page(self, mcp_env, embedder):
+        for i in range(4):
+            _seed_event(mcp_env, embedder, f"Observation {i}.")
+        result = mcp_server.memory_shadow_events("shared", 0, limit=2)
+        assert result["returned"] == 2
+        assert result["written"] == result["pending"] == 4
+        for limit in (0, 52):
+            with pytest.raises(ValueError):
+                mcp_server.memory_shadow_events("shared", 0, limit=limit)
+
+    def test_oversized_and_expired_events_are_visible_without_truncation(self, mcp_env, embedder):
+        eid = _seed_event(mcp_env, embedder, "x" * 4001)
+        mcp_env.set_payload("events", payload={"expires": "2000-01-01T00:00:00"}, points=[eid])
+        event = mcp_server.memory_shadow_events("shared", 0)["events"][0]
+        assert event["text"] is None
+        assert event["expired"] is True
+        assert len(mcp_env.retrieve("events", [eid])[0].payload["text"]) == 4001
+
+    def test_direct_entity_writes_do_not_enter_the_event_queue(self, mcp_env):
+        mcp_server.memory_store("preference", "sample", "A stable preference.")
+        assert mcp_server.memory_shadow_events("shared", 0)["written"] == 0
+
+    def test_supplementary_unicode_uses_the_consumer_length_limit(self, mcp_env, embedder):
+        _seed_event(mcp_env, embedder, "\U0001f680" * 2001)
+        assert mcp_server.memory_shadow_events("shared", 0)["events"][0]["text"] is None
+
+
 # ── memory_extract: stop the burn ────────────────────────
 
 class TestMemoryExtractBurnFix:
