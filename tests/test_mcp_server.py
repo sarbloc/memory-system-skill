@@ -168,6 +168,21 @@ class TestWriteTimeShadow:
         _seed_event(mcp_env, embedder, "\U0001f680" * 2001)
         assert mcp_server.memory_shadow_events("shared", 0)["events"][0]["text"] is None
 
+    def test_attempted_page_is_retired_then_pending_rows_are_reachable(self, mcp_env, embedder):
+        for i in range(55):
+            _seed_event(mcp_env, embedder, f"Isolated test observation {i}.")
+        page = mcp_server.memory_shadow_events("shared", 0)["events"]
+        assert len(page) == 51
+        for event in page:
+            mcp_server.memory_shadow_mark("shared", event["id"], "attempted")
+        # The consumer retires 50 attempted entries per pass, not leaving
+        # them permanently stuck in the page (see Endurance worker test).
+        for event in page[:50]:
+            mcp_server.memory_shadow_mark("shared", event["id"], "done")
+        next_page = mcp_server.memory_shadow_events("shared", 0)
+        assert next_page["returned"] == 5
+        assert sum(event["state"] == "pending" for event in next_page["events"]) == 4
+
 
 # ── memory_extract: stop the burn ────────────────────────
 
