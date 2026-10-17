@@ -70,17 +70,6 @@ See `skill/SKILL.md` for agent integration instructions.
 
 ## Development
 
-### Optional write-time memory shadowing
-
-New raw events carry a version-2 classification-pending marker in the same
-write. `memory_shadow_events` exposes pending/attempted work even after
-extraction; `memory_shadow_mark` updates only classification state. No
-external classifier runs in this package. One dedicated consumer must retain
-its activation cutoff, reserve attempts durably, and never retry uncertain
-attempts. Existing TTL/deletion and direct entity writes are unchanged.
-See the additive queue contract in `MEMORY-SYSTEM-SPEC.md` before enabling
-a consumer. Do not grant the queue tools to conversational agent profiles.
-
 ```bash
 pip install -e .
 python3 -m pytest tests/ -v

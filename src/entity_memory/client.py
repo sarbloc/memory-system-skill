@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -347,11 +347,6 @@ def store_event(
         "agent": agent,
         "extracted": False,
         "expires": expires,
-        # Captured with the event itself, independent of extraction. No Jev
-        # request, credential, or second copy of event text on the write path.
-        "shadow_version": 2,
-        "shadow_state": "pending",
-        "shadow_written_at": int(datetime.now(timezone.utc).timestamp() * 1000),
     }
     if run_id is not None:
         payload["run_id"] = run_id
@@ -363,7 +358,7 @@ def store_event(
         payload["trigger_source"] = trigger_source
 
     point = PointStruct(id=event_id, vector=vector, payload=payload)
-    client.upsert(collection_name=collection_name(domain, "events"), points=[point], wait=True)
+    client.upsert(collection_name=collection_name(domain, "events"), points=[point])
 
 
 def get_unextracted_events(
